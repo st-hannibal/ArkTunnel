@@ -115,6 +115,8 @@ sudo systemctl status arktunnel
 sudo journalctl -u arktunnel -n 50 --no-pager
 # Phase 13 WP3: localhost-only metrics endpoint
 curl -s http://127.0.0.1:9899/metrics
+# Phase 13 WP4: one-shot operator readiness check
+sudo ark-server verify
 ```
 
 ---

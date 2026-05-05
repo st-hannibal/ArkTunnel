@@ -4,6 +4,7 @@ mod init;
 mod metrics;
 mod probe_defense;
 mod run;
+mod verify;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -36,6 +37,10 @@ enum Commands {
     AddUser,
     /// Run the server daemon (requires a prior `init`).
     Run,
+    /// Run operator readiness checks (config, metrics, bitcoind sync,
+    /// peer count, bitnodes.io reachability). Exits non-zero on any
+    /// critical failure. (Phase 13 WP4.)
+    Verify,
 }
 
 #[tokio::main]
@@ -58,6 +63,9 @@ async fn main() -> Result<()> {
         }
         Commands::Run => {
             run::run_server().await?;
+        }
+        Commands::Verify => {
+            verify::run_verify().await?;
         }
     }
 
