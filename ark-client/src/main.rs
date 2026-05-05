@@ -1,6 +1,7 @@
 mod endpoints;
 mod http_proxy;
 mod pool;
+mod pool_registry;
 mod proxy;
 mod socks5;
 mod tun;
@@ -47,12 +48,24 @@ enum Commands {
         /// HTTP CONNECT listen address.
         #[arg(long, default_value = DEFAULT_HTTP_ADDR)]
         http: String,
+        /// Optional URL of a signed JSON pool registry (Phase 12 / WP3).
+        /// When set, the verified server list replaces the URI's endpoints.
+        #[arg(long)]
+        pool_url: Option<String>,
+        /// Hex-encoded 32-byte Ed25519 public key used to verify the pool
+        /// registry signature. Required together with --pool-url.
+        #[arg(long)]
+        pool_pubkey: Option<String>,
     },
     /// Test connectivity to the server. Exits 0 on success, 1 on failure.
     Test {
         /// arktunnel:// URI to test.
         #[arg(long, short)]
         uri: String,
+        #[arg(long)]
+        pool_url: Option<String>,
+        #[arg(long)]
+        pool_pubkey: Option<String>,
     },
     /// Full-device mode: spawn tun2socks and route the system through ArkTunnel.
     /// Requires sudo (Linux/macOS) or Administrator (Windows).
@@ -72,6 +85,10 @@ enum Commands {
         /// Optional override for the tun2socks binary path.
         #[arg(long)]
         tun2socks: Option<PathBuf>,
+        #[arg(long)]
+        pool_url: Option<String>,
+        #[arg(long)]
+        pool_pubkey: Option<String>,
     },
 }
 
@@ -87,20 +104,51 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { uri, socks5, http } => {
-            let ark_uri = Arc::new(uri::ArkUri::parse(&uri)?);
-            run_proxy(ark_uri, socks5, http).await?;
+        Commands::Run { uri, socks5, http, pool_url, pool_pubkey } => {
+            let mut ark_uri = uri::ArkUri::parse(&uri)?;
+            apply_pool(&mut ark_uri, pool_url.as_deref(), pool_pubkey.as_deref()).await?;
+            run_proxy(Arc::new(ark_uri), socks5, http).await?;
         }
-        Commands::Test { uri } => {
-            let ark_uri = uri::ArkUri::parse(&uri)?;
+        Commands::Test { uri, pool_url, pool_pubkey } => {
+            let mut ark_uri = uri::ArkUri::parse(&uri)?;
+            apply_pool(&mut ark_uri, pool_url.as_deref(), pool_pubkey.as_deref()).await?;
             test_connectivity(ark_uri).await;
         }
-        Commands::Tun { uri, socks5, tun_name, mtu, tun2socks } => {
-            let ark_uri = Arc::new(uri::ArkUri::parse(&uri)?);
-            run_tun(ark_uri, socks5, tun_name, mtu, tun2socks).await?;
+        Commands::Tun { uri, socks5, tun_name, mtu, tun2socks, pool_url, pool_pubkey } => {
+            let mut ark_uri = uri::ArkUri::parse(&uri)?;
+            apply_pool(&mut ark_uri, pool_url.as_deref(), pool_pubkey.as_deref()).await?;
+            run_tun(Arc::new(ark_uri), socks5, tun_name, mtu, tun2socks).await?;
         }
     }
 
+    Ok(())
+}
+
+/// If `--pool-url` is provided, fetch and verify the signed pool registry,
+/// then replace `uri.endpoints` with the verified list (filtered by
+/// transport). The URI's UUID and transport are preserved.
+async fn apply_pool(
+    uri: &mut uri::ArkUri,
+    pool_url: Option<&str>,
+    pool_pubkey: Option<&str>,
+) -> Result<()> {
+    let Some(url) = pool_url else { return Ok(()) };
+    let pubkey = pool_pubkey.ok_or_else(|| {
+        anyhow::anyhow!("--pool-url requires --pool-pubkey (32-byte hex Ed25519 key)")
+    })?;
+    let doc = pool_registry::load(url, pubkey).await?;
+    let new_eps = pool_registry::doc_to_endpoints(&doc, &uri.transport);
+    if new_eps.is_empty() {
+        anyhow::bail!(
+            "pool registry contains no servers matching transport={}",
+            uri.transport
+        );
+    }
+    tracing::info!(
+        servers = new_eps.len(),
+        "applied pool registry; replacing URI endpoint list"
+    );
+    uri.endpoints = new_eps;
     Ok(())
 }
 

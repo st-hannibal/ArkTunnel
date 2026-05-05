@@ -169,6 +169,46 @@ the *sticky* preferred entry for subsequent connections in the same
 process — this avoids scattering load across the pool. State is in-memory
 only; nothing is written to disk.
 
+### Signed pool registry (optional)
+
+Operators that run multiple servers can publish a tiny signed JSON
+document the client fetches at start. The verified server list replaces
+the URI's static endpoint list, so URIs stay short and the pool can
+rotate without re-issuing them.
+
+```sh
+ark-client run \
+  --uri 'arktunnel://<uuid>@fallback.example:8333?transport=bip324' \
+  --pool-url https://pool.example/arktunnel/pool.json \
+  --pool-pubkey <hex64-ed25519-public-key>
+```
+
+Document schema (sig is detached Ed25519 over the canonical JSON of the
+other top-level fields):
+
+```json
+{
+  "version": 1,
+  "updated": "2026-05-05T09:00:00Z",
+  "servers": [
+    {"host": "h1.example", "port": 8333, "weight": 1, "transport": "bip324"},
+    {"host": "h2.example", "port": 8333, "weight": 1, "transport": "bip324"}
+  ],
+  "sig": "<hex-encoded 64-byte Ed25519 signature>"
+}
+```
+
+The verified document is cached under the platform cache directory
+(`~/Library/Caches/arktunnel/pool.json` on macOS, `~/.cache/arktunnel/`
+on Linux, `%LOCALAPPDATA%\arktunnel\` on Windows). If the next start-up
+fetch fails (block or outage) the client falls back to the cached copy
+as long as its signature still verifies. Out of scope: gossip, DHT, and
+push updates — it's a static signed file fetched over HTTPS.
+
+A reference signer ships as `cargo run --example sign-pool -p ark-client`.
+Generate a key with `openssl rand -hex 32`; the signer prints the matching
+public key on stderr.
+
 ---
 
 ## Full-device mode (route everything)
