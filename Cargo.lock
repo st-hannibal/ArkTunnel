@@ -129,6 +129,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ark-probe"
+version = "0.1.9"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ark-server"
 version = "0.1.9"
 dependencies = [

@@ -1,5 +1,5 @@
 [workspace]
-members = ["ark-core", "ark-server", "ark-client"]
+members = ["ark-core", "ark-server", "ark-client", "ark-probe"]
 resolver = "2"
 
 [workspace.dependencies]

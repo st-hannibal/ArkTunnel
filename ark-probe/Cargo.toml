@@ -1,0 +1,23 @@
+[package]
+name = "ark-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Active-probe simulator and indistinguishability test harness for ArkTunnel"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ark-probe"
+path = "src/main.rs"
+
+[dependencies]
+tokio              = { workspace = true }
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap               = { workspace = true }
+rand               = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
