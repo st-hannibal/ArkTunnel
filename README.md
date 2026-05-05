@@ -143,6 +143,27 @@ curl --socks5 127.0.0.1:1080 https://api.ipify.org
 
 Point any app at `socks5://127.0.0.1:1080` or `http://127.0.0.1:8118`.
 
+### URI grammar
+
+```
+arktunnel://<uuid>@<host>:<port>[,<host>:<port>…]?transport=<name>[&backup=<host>:<port>…][&nodekey=<hex>]
+```
+
+- **Single endpoint** (v0.1.x compatible):
+  `arktunnel://<uuid>@server.example:8333?transport=bip324`
+- **Multiple endpoints** (v0.2.0+) — comma-separated in the host list:
+  `arktunnel://<uuid>@h1.example:8333,h2.example:8333,h3.example:8333?transport=bip324`
+- **Or** with repeated `&backup=` query params:
+  `arktunnel://<uuid>@h1.example:8333?transport=bip324&backup=h2.example:8333&backup=h3.example:8333`
+- IPv6 endpoints must be bracketed: `[2001:db8::1]:8333`.
+- Order is preserved; the first entry is the primary. Duplicate
+  `host:port` entries are silently deduped.
+- `transport=rlpx` requires `&nodekey=<hex128>` and supports a single
+  endpoint only.
+
+The client tries endpoints in order on connect failure (failover behavior
+arrives in v0.2.0 WP2).
+
 ---
 
 ## Full-device mode (route everything)

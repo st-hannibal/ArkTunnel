@@ -42,13 +42,13 @@ impl Target {
 /// pre-establish channels without knowing the final target address.
 pub async fn open_transport_only(uri: &ArkUri) -> Result<BoxedAsyncReadWrite> {
     let server_addr: std::net::SocketAddr =
-        format!("{}:{}", uri.host, uri.port)
+        format!("{}:{}", uri.host(), uri.port())
             .parse()
-            .with_context(|| format!("invalid server address: {}:{}", uri.host, uri.port))?;
+            .with_context(|| format!("invalid server address: {}:{}", uri.host(), uri.port()))?;
 
     let tcp = TcpStream::connect(server_addr)
         .await
-        .with_context(|| format!("TCP connect to ark-server {}:{}", uri.host, uri.port))?;
+        .with_context(|| format!("TCP connect to ark-server {}:{}", uri.host(), uri.port()))?;
     let _ = tcp.set_nodelay(true);
 
     match uri.transport {

@@ -118,7 +118,7 @@ async fn run_tun(
 
     println!("ArkTunnel client (TUN mode)");
     println!("  Transport   : {}", uri.transport);
-    println!("  Server      : {}:{} ({server_ip})", uri.host, uri.port);
+    println!("  Server      : {}:{} ({server_ip})", uri.host(), uri.port());
     println!("  UUID        : {}", uri.uuid);
     println!("  SOCKS5      : {socks5_addr}");
     println!("  TUN device  : {tun_name}");
@@ -187,7 +187,7 @@ use tracing::warn;
 async fn run_proxy(uri: Arc<uri::ArkUri>, socks5_addr: String, http_addr: String) -> Result<()> {
     println!("ArkTunnel client");
     println!("  Transport   : {}", uri.transport);
-    println!("  Server      : {}:{}", uri.host, uri.port);
+    println!("  Server      : {}:{}", uri.host(), uri.port());
     println!("  UUID        : {}", uri.uuid);
     println!("  SOCKS5      : {socks5_addr}");
     println!("  HTTP CONNECT: {http_addr}");
@@ -225,7 +225,7 @@ async fn test_connectivity(uri: uri::ArkUri) {
     use std::time::Instant;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    println!("Testing connectivity to {}:{}…", uri.host, uri.port);
+    println!("Testing connectivity to {}:{}…", uri.host(), uri.port());
     let start = Instant::now();
 
     // Use example.com:80 as a well-known reachable test target.

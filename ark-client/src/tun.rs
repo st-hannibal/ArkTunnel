@@ -102,16 +102,16 @@ fn which(bin: &str) -> Result<PathBuf> {
 /// Resolve the configured ark-server hostname to an IP literal so that we can
 /// install a /32 bypass route. If the URI host is already an IP, return it.
 pub async fn resolve_server_ip(uri: &ArkUri) -> Result<std::net::IpAddr> {
-    if let Ok(ip) = uri.host.parse::<std::net::IpAddr>() {
+    if let Ok(ip) = uri.host().parse::<std::net::IpAddr>() {
         return Ok(ip);
     }
-    let addrs = tokio::net::lookup_host((uri.host.as_str(), uri.port))
+    let addrs = tokio::net::lookup_host((uri.host(), uri.port()))
         .await
-        .with_context(|| format!("resolving server host {}", uri.host))?;
+        .with_context(|| format!("resolving server host {}", uri.host()))?;
     let v4 = addrs
         .into_iter()
         .find(|a| a.is_ipv4())
-        .ok_or_else(|| anyhow!("no IPv4 address for {}", uri.host))?;
+        .ok_or_else(|| anyhow!("no IPv4 address for {}", uri.host()))?;
     Ok(v4.ip())
 }
 
