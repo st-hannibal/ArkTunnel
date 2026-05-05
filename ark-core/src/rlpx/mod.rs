@@ -215,9 +215,10 @@ impl Transport for RlpxTransport {
     async fn accept(stream: TcpStream) -> Result<Multiplexed> {
         let (static_priv, static_pub) = get_static_key();
         match do_responder_handshake(stream, static_priv, static_pub).await? {
-            ResponderOutcome::ArkClient { stream: enc, uuid } => Ok(Multiplexed::ArkClient {
+            ResponderOutcome::ArkClient { stream: enc, uuid, extra } => Ok(Multiplexed::ArkClient {
                 stream: BoxedAsyncReadWrite(Box::new(RlpxStream::new(enc))),
                 uuid,
+                extra,
             }),
             ResponderOutcome::RealPeer(enc) => Ok(Multiplexed::RealPeer {
                 // The connection is already inside an RLPx encrypted session; wrap it so

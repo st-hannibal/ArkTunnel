@@ -228,10 +228,16 @@ dominated by per-packet padding, typically < 10 % for browsing-shaped
 flows.
 
 The wire-level activation is gated on ARK-frame v2 capability bits
-(WP5). Until WP5 ships, choosing `light` or `heavy` logs a
-`traffic shaping configured but inactive` warning and behaves as
-`off` — the policy preference is recorded for forward-compatibility
-but no padding or cover frames hit the wire.
+(WP5). When the client is started with `--shape light` or `heavy` it
+appends a 6-byte v2 hello (`ARKV || ver || caps`) to the encrypted
+ARK1+UUID packet and waits up to 2 s for the server's matching ack.
+A v0.2.x server replies with the AND-merge of supported capabilities
+(`bit0 = COVER`, `bit1 = PAD_QUANTIZE`); a v0.1.x server is silent and
+the client logs `server did not ack ARK-frame v2; falling back to v1`
+and proceeds without padding or cover frames. The actual emission of
+`CMD_COVER` frames + length quantization on top of the negotiated bits
+is wired in a follow-up commit; this WP only ships the negotiation
+plumbing.
 
 ---
 

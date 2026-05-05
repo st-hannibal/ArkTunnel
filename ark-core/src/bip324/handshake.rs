@@ -352,6 +352,9 @@ pub enum ResponderOutcome {
     ArkClient {
         stream: EncryptedStream,
         uuid: uuid::Uuid,
+        /// Bytes carried in the same application packet after the
+        /// 20-byte `ARK1 || uuid` marker (ARK-frame v2 hello, etc.).
+        extra: Vec<u8>,
     },
     /// Peer sent a real Bitcoin v1 message — forward raw TCP stream.
     /// `peeked` holds the 16-byte v1 prefix that was consumed during detection.
@@ -430,10 +433,14 @@ pub async fn do_responder_handshake(mut stream: TcpStream) -> Result<ResponderOu
 
     if first_payload.len() >= 4 && &first_payload[..4] == ARK1_MAGIC {
         match parse_ark1(&first_payload) {
-            Some(uuid) => Ok(ResponderOutcome::ArkClient {
-                stream: enc_stream,
-                uuid,
-            }),
+            Some(uuid) => {
+                let extra = first_payload[20..].to_vec();
+                Ok(ResponderOutcome::ArkClient {
+                    stream: enc_stream,
+                    uuid,
+                    extra,
+                })
+            }
             None => bail!("malformed ARK1 payload (missing uuid)"),
         }
     } else {

@@ -74,6 +74,11 @@ pub enum Multiplexed {
     ArkClient {
         stream: BoxedAsyncReadWrite,
         uuid: uuid::Uuid,
+        /// Bytes consumed in the same application packet *after* the
+        /// 20-byte `ARK1 || uuid` marker. Carries the optional ARK-frame
+        /// v2 hello (`ARKV || ver || caps`) for v0.2.x clients; empty for
+        /// v0.1.x clients. The server inspects this in `arkframe::v2`.
+        extra: Vec<u8>,
     },
 
     /// Incoming connection is a real crypto peer.

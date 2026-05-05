@@ -48,6 +48,103 @@ pub const CMD_UDP_ASSOCIATE: u8 = 0x02;
 /// capability bit (negotiated in WP5) — v0.1.x servers will close.
 pub const CMD_COVER: u8 = 0xFE;
 
+// ---------------------------------------------------------------------------
+// ARK-frame v2 negotiation (Phase 12 WP5)
+// ---------------------------------------------------------------------------
+
+/// Magic prefix for the optional v2 hello carried in the same encrypted
+/// packet as `ARK1 || uuid`. v0.1.x clients omit this; v0.1.x servers
+/// ignore the trailing bytes.
+pub const ARK_V2_MAGIC: &[u8; 4] = b"ARKV";
+
+/// Highest ARK-frame version this build understands.
+pub const ARK_VERSION_V1: u8 = 0x01;
+pub const ARK_VERSION_V2: u8 = 0x02;
+
+/// Capability bits negotiated in the v2 handshake. AND-merged between
+/// client request and server support.
+pub const CAP_COVER: u8 = 0x01;
+pub const CAP_PAD_QUANTIZE: u8 = 0x02;
+
+/// All v2 capability bits this build supports.
+pub const CAPS_SUPPORTED: u8 = CAP_COVER | CAP_PAD_QUANTIZE;
+
+/// Length of the v2 hello body: `ARKV(4) || version(1) || caps(1)`.
+pub const V2_HELLO_LEN: usize = 6;
+
+/// Length of the v2 ack body: `ARKV(4) || server_version(1) || agreed_caps(1)`.
+pub const V2_ACK_LEN: usize = 6;
+
+/// Build the client→server v2 hello.
+pub fn build_v2_hello(caps: u8) -> [u8; V2_HELLO_LEN] {
+    let mut buf = [0u8; V2_HELLO_LEN];
+    buf[..4].copy_from_slice(ARK_V2_MAGIC);
+    buf[4] = ARK_VERSION_V2;
+    buf[5] = caps & CAPS_SUPPORTED;
+    buf
+}
+
+/// Build the server→client v2 ack. `agreed` MUST be a subset of the
+/// client-requested capability set the server is willing to honor.
+pub fn build_v2_ack(server_version: u8, agreed: u8) -> [u8; V2_ACK_LEN] {
+    let mut buf = [0u8; V2_ACK_LEN];
+    buf[..4].copy_from_slice(ARK_V2_MAGIC);
+    buf[4] = server_version;
+    buf[5] = agreed & CAPS_SUPPORTED;
+    buf
+}
+
+/// Parse a v2 hello/ack body. Returns `(version, caps)` on success or
+/// `None` if the buffer is too short or the magic does not match.
+pub fn parse_v2_frame(buf: &[u8]) -> Option<(u8, u8)> {
+    if buf.len() < V2_HELLO_LEN {
+        return None;
+    }
+    if &buf[..4] != ARK_V2_MAGIC {
+        return None;
+    }
+    Some((buf[4], buf[5]))
+}
+
+/// Server-side helper: given the bytes that arrived in the same packet
+/// after `ARK1 || uuid`, decide whether the client speaks v2 and reply
+/// with the appropriate ack. Returns the agreed-upon capability bits
+/// (zero if the peer is v1).
+///
+/// On v1 (empty / no magic) this is a no-op and returns `0`.
+pub async fn server_negotiate_v2<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    extra: &[u8],
+) -> Result<u8> {
+    let Some((client_version, client_caps)) = parse_v2_frame(extra) else {
+        return Ok(0);
+    };
+    if client_version < ARK_VERSION_V2 {
+        return Ok(0);
+    }
+    let agreed = client_caps & CAPS_SUPPORTED;
+    let ack = build_v2_ack(ARK_VERSION_V2, agreed);
+    writer.write_all(&ack).await?;
+    writer.flush().await?;
+    Ok(agreed)
+}
+
+/// Client-side helper: read the server's v2 ack with a deadline.
+/// Returns the agreed capability bits, or `0` if the deadline expires
+/// (treated as "v1 server, no v2 features available").
+pub async fn client_read_v2_ack<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    deadline: std::time::Duration,
+) -> u8 {
+    let mut buf = [0u8; V2_ACK_LEN];
+    let result = tokio::time::timeout(deadline, reader.read_exact(&mut buf)).await;
+    match result {
+        Ok(Ok(_)) => parse_v2_frame(&buf).map(|(_, caps)| caps).unwrap_or(0),
+        // Timeout, EOF, or any read error: treat as v1.
+        _ => 0,
+    }
+}
+
 /// Largest UDP payload we will frame (keeps `total` < u16::MAX with header room).
 pub const MAX_UDP_PAYLOAD: usize = 65000;
 
@@ -585,5 +682,89 @@ mod tests {
     #[test]
     fn cover_frame_too_large_rejected() {
         assert!(build_cover_frame(MAX_COVER_LEN + 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn v2_hello_ack_roundtrip() {
+        let hello = build_v2_hello(CAP_COVER | CAP_PAD_QUANTIZE);
+        let (v, caps) = parse_v2_frame(&hello).unwrap();
+        assert_eq!(v, ARK_VERSION_V2);
+        assert_eq!(caps, CAP_COVER | CAP_PAD_QUANTIZE);
+
+        // Server-side negotiation echoes the AND of client + server caps.
+        let mut sink: Vec<u8> = Vec::new();
+        let agreed = server_negotiate_v2(&mut sink, &hello).await.unwrap();
+        assert_eq!(agreed, CAP_COVER | CAP_PAD_QUANTIZE);
+        let (sv, sc) = parse_v2_frame(&sink).unwrap();
+        assert_eq!(sv, ARK_VERSION_V2);
+        assert_eq!(sc, CAP_COVER | CAP_PAD_QUANTIZE);
+    }
+
+    #[tokio::test]
+    async fn v2_strips_unknown_caps() {
+        // Client requests an unknown bit; server AND-merges with CAPS_SUPPORTED.
+        let mut hello = build_v2_hello(CAP_COVER);
+        hello[5] |= 0x80; // bogus reserved bit
+        // build_v2_hello already masks; manually inject a stray bit and
+        // confirm the server still strips it.
+        let mut sink: Vec<u8> = Vec::new();
+        let agreed = server_negotiate_v2(&mut sink, &hello).await.unwrap();
+        assert_eq!(agreed & 0x80, 0);
+        assert_eq!(agreed, CAP_COVER);
+    }
+
+    #[tokio::test]
+    async fn v2_v1_client_skipped() {
+        // Empty trailer: v1 client, server returns 0 and writes nothing.
+        let mut sink: Vec<u8> = Vec::new();
+        let agreed = server_negotiate_v2(&mut sink, &[]).await.unwrap();
+        assert_eq!(agreed, 0);
+        assert!(sink.is_empty());
+    }
+
+    #[tokio::test]
+    async fn v2_bad_magic_treated_as_v1() {
+        // Trailer present but doesn't start with ARKV — treat as v1, no ack.
+        let mut sink: Vec<u8> = Vec::new();
+        let agreed = server_negotiate_v2(&mut sink, b"NOTM\x02\x03").await.unwrap();
+        assert_eq!(agreed, 0);
+        assert!(sink.is_empty());
+    }
+
+    #[tokio::test]
+    async fn v2_client_ack_timeout_falls_back_to_v1() {
+        // No bytes ever arrive — `client_read_v2_ack` must return 0
+        // within the deadline.
+        let (mut client, _server) = tokio::io::duplex(64);
+        let agreed =
+            client_read_v2_ack(&mut client, std::time::Duration::from_millis(20)).await;
+        assert_eq!(agreed, 0);
+    }
+
+    #[tokio::test]
+    async fn v2_client_ack_wrong_magic_falls_back_to_v1() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        // Server speaks v1 but happens to send a 6-byte response that doesn't
+        // start with ARKV — client must treat it as v1.
+        server.write_all(b"BOGUS!").await.unwrap();
+        let agreed =
+            client_read_v2_ack(&mut client, std::time::Duration::from_millis(50)).await;
+        assert_eq!(agreed, 0);
+    }
+
+    #[tokio::test]
+    async fn v2_client_ack_returns_agreed_caps() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let ack = build_v2_ack(ARK_VERSION_V2, CAP_PAD_QUANTIZE);
+        server.write_all(&ack).await.unwrap();
+        let agreed =
+            client_read_v2_ack(&mut client, std::time::Duration::from_millis(100)).await;
+        assert_eq!(agreed, CAP_PAD_QUANTIZE);
+    }
+
+    #[test]
+    fn v2_hello_masks_unsupported_bits_at_build_time() {
+        let h = build_v2_hello(0xFF);
+        assert_eq!(h[5], CAPS_SUPPORTED);
     }
 }

@@ -84,8 +84,14 @@ async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>) -> Result<
     match cfg.transport {
         TransportKind::Bip324 => {
             match Bip324Transport::accept(stream).await? {
-                Multiplexed::ArkClient { mut stream, uuid } => {
+                Multiplexed::ArkClient { mut stream, uuid, extra } => {
                     validate_uuid(&cfg, &uuid)?;
+                    let caps = arkframe::server_negotiate_v2(&mut stream, &extra)
+                        .await
+                        .context("v2 negotiation")?;
+                    if caps != 0 {
+                        info!(uuid = %uuid, caps = format!("0x{caps:02x}"), "ARK-frame v2 negotiated");
+                    }
                     serve_arkframe(&mut stream).await?;
                 }
                 Multiplexed::RealPeer { mut stream, peeked } => {
@@ -101,8 +107,14 @@ async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>) -> Result<
         }
         TransportKind::Rlpx => {
             match RlpxTransport::accept(stream).await? {
-                Multiplexed::ArkClient { mut stream, uuid } => {
+                Multiplexed::ArkClient { mut stream, uuid, extra } => {
                     validate_uuid(&cfg, &uuid)?;
+                    let caps = arkframe::server_negotiate_v2(&mut stream, &extra)
+                        .await
+                        .context("v2 negotiation")?;
+                    if caps != 0 {
+                        info!(uuid = %uuid, caps = format!("0x{caps:02x}"), "ARK-frame v2 negotiated");
+                    }
                     serve_arkframe(&mut stream).await?;
                 }
                 Multiplexed::RealPeer { stream, .. } => {

@@ -146,11 +146,12 @@ async fn main() -> Result<()> {
 /// v2 capability bits, anything other than `off` is recorded but not
 /// emitted on the wire (the wiring lands in WP5).
 fn log_shape(shape: Shape) {
+    proxy::set_shape(shape);
     match shape {
         Shape::Off => tracing::info!(shape = %shape, "traffic shaping disabled"),
-        _ => tracing::warn!(
+        _ => tracing::info!(
             shape = %shape,
-            "traffic shaping configured but inactive: requires ARK-frame v2 (Phase 12 WP5)"
+            "traffic shaping requested; capabilities will be negotiated with the server"
         ),
     }
 }

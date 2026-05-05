@@ -338,9 +338,10 @@ impl Transport for Bip324Transport {
 
     async fn accept(stream: TcpStream) -> Result<Multiplexed> {
         match do_responder_handshake(stream).await? {
-            ResponderOutcome::ArkClient { stream: enc, uuid } => Ok(Multiplexed::ArkClient {
+            ResponderOutcome::ArkClient { stream: enc, uuid, extra } => Ok(Multiplexed::ArkClient {
                 stream: BoxedAsyncReadWrite(Box::new(Bip324Stream::new(enc))),
                 uuid,
+                extra,
             }),
             ResponderOutcome::RealPeer { stream, peeked } => Ok(Multiplexed::RealPeer {
                 stream: BoxedAsyncReadWrite(Box::new(stream)),
@@ -374,7 +375,7 @@ mod integration_tests {
         let resp = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             match Bip324Transport::accept(stream).await.unwrap() {
-                Multiplexed::ArkClient { mut stream, uuid } => {
+                Multiplexed::ArkClient { mut stream, uuid, extra: _ } => {
                     assert_eq!(uuid, uuid_expected, "UUID mismatch");
                     // Echo: read 5 bytes, write them back uppercased.
                     let mut buf = [0u8; 5];

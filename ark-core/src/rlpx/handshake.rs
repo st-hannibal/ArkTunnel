@@ -97,6 +97,9 @@ pub enum ResponderOutcome {
     ArkClient {
         stream: RlpxEncryptedStream,
         uuid: uuid::Uuid,
+        /// Bytes carried in the ARK1 frame after the 20-byte ARK1+UUID
+        /// marker (ARK-frame v2 hello, etc.).
+        extra: Vec<u8>,
     },
     /// Peer sent a standard Ethereum Hello (no ARK1) — treat as a real Ethereum node.
     ///
@@ -337,10 +340,13 @@ pub async fn do_responder_handshake(
     let has_ark1 = parse_hello_has_ark1(&init_hello);
 
     if has_ark1 {
-        // Read the ARK1 data frame (contains ARK1_MAGIC || uuid)
+        // Read the ARK1 data frame (contains ARK1_MAGIC || uuid [|| ARK-frame v2 hello])
         let ark1_frame = enc.recv_frame().await?;
         match parse_ark1(&ark1_frame) {
-            Some(uuid) => Ok(ResponderOutcome::ArkClient { stream: enc, uuid }),
+            Some(uuid) => {
+                let extra = ark1_frame[20..].to_vec();
+                Ok(ResponderOutcome::ArkClient { stream: enc, uuid, extra })
+            }
             None => bail!("RLPx: Hello has ARK1 but next frame is not a valid ARK1 payload"),
         }
     } else {
@@ -696,7 +702,7 @@ mod tests {
         // Server receives outcome
         let outcome = server_task.await.unwrap();
         match outcome {
-            ResponderOutcome::ArkClient { mut stream, uuid } => {
+            ResponderOutcome::ArkClient { mut stream, uuid, extra: _ } => {
                 assert_eq!(uuid, test_uuid, "UUID round-trip failed");
 
                 // Data round-trip: server→client
