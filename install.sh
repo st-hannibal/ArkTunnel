@@ -176,12 +176,39 @@ if [[ "$TRANSPORT" == "bip324" ]]; then
     rm -rf "$TMP"
     log "bitcoind $BITCOIN_VERSION installed"
 
-    # Write bitcoind config (regtest-free, listen on non-standard port)
+    # ---- Phase 13 WP2: real-mainnet, pruned, externally-advertised ----
+    # bitcoind binds locally on 18444; ark-server occupies the public 8333
+    # and splices RealPeer connections to 18444. We tell bitcoind to
+    # *advertise* port 8333 (via port=) and the public IP (via externalip=)
+    # so real Bitcoin peers (and bitnodes.io crawlers) connect back through
+    # ark-server. This is what gives the server a real connection graph.
+    PUBLIC_IP="${ARK_PUBLIC_IP:-}"
+    if [[ -z "$PUBLIC_IP" ]]; then
+      PUBLIC_IP=$(curl -fsSL --max-time 5 https://api.ipify.org || true)
+    fi
+    if [[ -z "$PUBLIC_IP" ]]; then
+      warn "Could not auto-detect public IP; bitcoind will run without externalip."
+      warn "Set ARK_PUBLIC_IP=<ip> and re-run to enable inbound real-peer traffic."
+      EXTERNALIP_LINE="# externalip not set"
+    else
+      log "Configuring bitcoind externalip=${PUBLIC_IP}:8333"
+      EXTERNALIP_LINE="externalip=${PUBLIC_IP}:8333"
+    fi
+
     mkdir -p /etc/bitcoin
-    cat > /etc/bitcoin/bitcoin.conf <<'BTCEOF'
+    cat > /etc/bitcoin/bitcoin.conf <<BTCEOF
+# ArkTunnel bitcoind config (Phase 13 WP2)
+# Real mainnet, pruned, listens locally; ark-server fronts the public :8333.
 server=1
 listen=1
 bind=127.0.0.1:18444
+# Tell peers to reach us on :8333 (which is ark-server, which splices back).
+port=8333
+${EXTERNALIP_LINE}
+# Pruned full node: ~5–10 GB on disk after IBD.
+prune=550
+maxconnections=64
+# RPC kept localhost-only for ark-server health probes.
 rpcbind=127.0.0.1
 rpcport=18443
 rpcuser=arktunnel
@@ -246,10 +273,19 @@ fi
 # --- systemd units ---
 log "Writing systemd unit files"
 
+if [[ "$TRANSPORT" == "bip324" ]]; then
+  ARK_AFTER="network.target bitcoind.service"
+  ARK_WANTS="Wants=bitcoind.service"
+else
+  ARK_AFTER="network.target"
+  ARK_WANTS=""
+fi
+
 cat > /etc/systemd/system/arktunnel.service <<UNIT
 [Unit]
 Description=ArkTunnel server
-After=network.target
+After=$ARK_AFTER
+$ARK_WANTS
 
 [Service]
 Type=simple
@@ -320,3 +356,9 @@ log "  URI:        $URI"
 log ""
 log "Check status:  systemctl status arktunnel"
 log "View logs:     journalctl -u arktunnel -f"
+if [[ "$TRANSPORT" == "bip324" ]]; then
+  log ""
+  log "Bitcoin Core is doing initial block download (pruned, ~5-10 GB)."
+  log "Verify peers:    bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf getpeerinfo | jq length"
+  log "Verify reachable: https://bitnodes.io/nodes/?q=\$(curl -s https://api.ipify.org)"
+fi
