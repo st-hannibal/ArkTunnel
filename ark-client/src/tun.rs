@@ -44,6 +44,11 @@ pub struct TunConfig {
     pub mtu: u16,
     #[allow(dead_code)]
     pub tun2socks_override: Option<PathBuf>,
+    /// When true, do NOT install IPv6 blackhole routes — let v6 traffic
+    /// flow through the tunnel (requires the URI to contain a v6 endpoint
+    /// or the server to expose v6 egress). Default `false` keeps the
+    /// safe-by-default v4-only behaviour.
+    pub allow_ipv6: bool,
 }
 
 /// Locate the `tun2socks` binary using, in order:
@@ -237,22 +242,28 @@ pub async fn install_routes(
             .record_undo(vec!["ip".into(), "route".into(), "del".into(), "default".into()])
             .await;
 
-        // 4. Block IPv6 entirely — ArkTunnel only carries IPv4 today, so any
-        //    v6-capable site would otherwise bypass the tunnel and leak the
-        //    user's real IPv6 address.
-        for net6 in ["::/1", "8000::/1"] {
-            if run_cmd(&["ip", "-6", "route", "add", "blackhole", net6])
-                .await
-                .is_ok()
-            {
-                janitor
-                    .record_undo(vec![
-                        "ip".into(), "-6".into(), "route".into(), "del".into(),
-                        "blackhole".into(), net6.into(),
-                    ])
-                    .await;
-            } else {
-                warn!("could not install IPv6 blackhole route for {net6}; v6 may leak");
+        // 4. Block IPv6 entirely (default) — ArkTunnel historically only
+        //    carried IPv4, so any v6-capable site would otherwise bypass the
+        //    tunnel and leak the user's real IPv6 address. WP10 added an
+        //    `--ipv6` opt-in that lifts the blackhole; the operator is then
+        //    responsible for ensuring the URI / server actually carries v6.
+        if cfg.allow_ipv6 {
+            info!("--ipv6 enabled; not installing IPv6 blackhole route");
+        } else {
+            for net6 in ["::/1", "8000::/1"] {
+                if run_cmd(&["ip", "-6", "route", "add", "blackhole", net6])
+                    .await
+                    .is_ok()
+                {
+                    janitor
+                        .record_undo(vec![
+                            "ip".into(), "-6".into(), "route".into(), "del".into(),
+                            "blackhole".into(), net6.into(),
+                        ])
+                        .await;
+                } else {
+                    warn!("could not install IPv6 blackhole route for {net6}; v6 may leak");
+                }
             }
         }
     }
@@ -342,24 +353,26 @@ pub async fn install_routes(
                 .await;
         }
 
-        // Block IPv6 entirely while the tunnel is up. ArkTunnel only carries
-        // IPv4 today, so without these blackhole routes any v6-capable site
-        // (Google, YouTube, most CDNs) would silently bypass the tunnel and
-        // leak the user's real IPv6 address. Use ::1 (loopback) as the gateway
-        // so the kernel drops packets locally instead of trying to forward.
-        for net6 in ["::/1", "8000::/1"] {
-            if run_cmd(&["route", "-n", "add", "-inet6", "-net", net6, "::1", "-blackhole"])
-                .await
-                .is_ok()
-            {
-                janitor
-                    .record_undo(vec![
-                        "route".into(), "-n".into(), "delete".into(), "-inet6".into(),
-                        "-net".into(), net6.into(),
-                    ])
-                    .await;
-            } else {
-                warn!("could not install IPv6 blackhole route for {net6}; v6 may leak");
+        // Block IPv6 entirely while the tunnel is up (default). WP10 added
+        // an `--ipv6` opt-in: when enabled, callers accept responsibility for
+        // ensuring v6 traffic is actually carried by the tunnel.
+        if cfg.allow_ipv6 {
+            info!("--ipv6 enabled; not installing IPv6 blackhole route");
+        } else {
+            for net6 in ["::/1", "8000::/1"] {
+                if run_cmd(&["route", "-n", "add", "-inet6", "-net", net6, "::1", "-blackhole"])
+                    .await
+                    .is_ok()
+                {
+                    janitor
+                        .record_undo(vec![
+                            "route".into(), "-n".into(), "delete".into(), "-inet6".into(),
+                            "-net".into(), net6.into(),
+                        ])
+                        .await;
+                } else {
+                    warn!("could not install IPv6 blackhole route for {net6}; v6 may leak");
+                }
             }
         }
     }
@@ -393,26 +406,28 @@ pub async fn install_routes(
                 .await;
         }
 
-        // Block IPv6 entirely — ArkTunnel only carries IPv4 today, so any
-        // v6-capable site would otherwise bypass the tunnel and leak the
-        // user's real IPv6 address.
-        for net6 in ["::/1", "8000::/1"] {
-            if run_cmd(&[
-                "netsh", "interface", "ipv6", "add", "route",
-                net6, "interface=Loopback Pseudo-Interface 1",
-            ])
-            .await
-            .is_ok()
-            {
-                janitor
-                    .record_undo(vec![
-                        "netsh".into(), "interface".into(), "ipv6".into(),
-                        "delete".into(), "route".into(), net6.into(),
-                        "interface=Loopback Pseudo-Interface 1".into(),
-                    ])
-                    .await;
-            } else {
-                warn!("could not install IPv6 blackhole route for {net6}; v6 may leak");
+        // Block IPv6 entirely (default). WP10 `--ipv6` lifts this when set.
+        if cfg.allow_ipv6 {
+            info!("--ipv6 enabled; not installing IPv6 blackhole route");
+        } else {
+            for net6 in ["::/1", "8000::/1"] {
+                if run_cmd(&[
+                    "netsh", "interface", "ipv6", "add", "route",
+                    net6, "interface=Loopback Pseudo-Interface 1",
+                ])
+                .await
+                .is_ok()
+                {
+                    janitor
+                        .record_undo(vec![
+                            "netsh".into(), "interface".into(), "ipv6".into(),
+                            "delete".into(), "route".into(), net6.into(),
+                            "interface=Loopback Pseudo-Interface 1".into(),
+                        ])
+                        .await;
+                } else {
+                    warn!("could not install IPv6 blackhole route for {net6}; v6 may leak");
+                }
             }
         }
     }

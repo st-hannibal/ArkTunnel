@@ -293,6 +293,7 @@ Your SSH session to the server keeps working because of the `/32` bypass.
 | `--tun-name` | `utun8` / `tun8` / `wintun` | TUN device name |
 | `--mtu` | `1500` | MTU for the TUN device |
 | `--tun2socks` | auto-detect | explicit path to the `tun2socks` binary |
+| `--ipv6` | `false` | allow IPv6 traffic to flow through the tunnel (default blackholes v6 to prevent leaks) |
 
 ### Caveats
 
@@ -307,9 +308,14 @@ Your SSH session to the server keeps working because of the `/32` bypass.
 - **SOCKS5-only mode (no TUN) still leaks DNS.** Apps that resolve hostnames
   themselves before handing the IP to the SOCKS proxy will leak. Configure
   the app to send hostnames to the SOCKS proxy ("remote DNS" / SOCKS5h).
-- **IPv6 is fully blocked while TUN is active.** ArkTunnel only carries IPv4
-  today, so v6 routes are blackholed to prevent leaks of your real IPv6
-  address. Apps fall back to IPv4 transparently.
+- **IPv6 is blackholed by default while TUN is active.** ArkTunnel’s
+  ARK-frame already carries v6 (`atype = 0x04`) and the server egress
+  resolves v6 destinations, but to stay safe-by-default we still install
+  blackhole routes for `::/0` so v6-capable apps don’t silently bypass the
+  tunnel and leak the user’s real IPv6 address. Pass `--ipv6` to lift the
+  blackhole when you have verified that the URI / server actually carry v6
+  egress (WP10). Apps fall back to IPv4 transparently when v6 is
+  blackholed.
 - **System default route is altered transiently.** ArkTunnel uses the
   split-default trick (`0.0.0.0/1` + `128.0.0.0/1`) so the original default
   route is left untouched and is restored on shutdown. If `ark-client` is

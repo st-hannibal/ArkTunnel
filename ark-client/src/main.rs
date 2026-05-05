@@ -101,6 +101,11 @@ enum Commands {
         pool_pubkey: Option<String>,
         #[arg(long, default_value = "off")]
         shape: String,
+        /// Allow IPv6 traffic to flow through the tunnel. By default the
+        /// client installs a blackhole route for `::/0` to prevent v6 leaks.
+        /// Enable this only when the URI / server actually carry v6 egress.
+        #[arg(long, default_value_t = false)]
+        ipv6: bool,
     },
 }
 
@@ -130,12 +135,12 @@ async fn main() -> Result<()> {
             log_shape(shape);
             test_connectivity(ark_uri).await;
         }
-        Commands::Tun { uri, socks5, tun_name, mtu, tun2socks, pool_url, pool_pubkey, shape } => {
+        Commands::Tun { uri, socks5, tun_name, mtu, tun2socks, pool_url, pool_pubkey, shape, ipv6 } => {
             let shape: Shape = shape.parse().map_err(anyhow::Error::msg)?;
             let mut ark_uri = uri::ArkUri::parse(&uri)?;
             apply_pool(&mut ark_uri, pool_url.as_deref(), pool_pubkey.as_deref()).await?;
             log_shape(shape);
-            run_tun(Arc::new(ark_uri), socks5, tun_name, mtu, tun2socks).await?;
+            run_tun(Arc::new(ark_uri), socks5, tun_name, mtu, tun2socks, ipv6).await?;
         }
     }
 
@@ -190,6 +195,7 @@ async fn run_tun(
     tun_name: String,
     mtu: u16,
     tun2socks_override: Option<PathBuf>,
+    allow_ipv6: bool,
 ) -> Result<()> {
     use tracing::{error, info};
 
@@ -225,6 +231,7 @@ async fn run_tun(
         tun_name,
         mtu,
         tun2socks_override,
+        allow_ipv6,
     };
 
     // 2. Spawn tun2socks (it creates the device on macOS/Windows; on Linux
