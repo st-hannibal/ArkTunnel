@@ -95,7 +95,7 @@ impl AsyncRead for Bip324Stream {
         match boxed.as_mut().poll(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(e)) => {
-                Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                Poll::Ready(Err(std::io::Error::other(e)))
             }
             Poll::Ready(Ok(plaintext)) => {
                 this.read_buf = plaintext;
@@ -139,10 +139,7 @@ impl AsyncWrite for Bip324Stream {
                     this.flush_pos = 0;
                 }
                 Err(e) => {
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e,
-                    )));
+                    return Poll::Ready(Err(std::io::Error::other(e)));
                 }
             }
         }

@@ -338,6 +338,7 @@ pub async fn do_initiator_handshake(mut stream: TcpStream) -> Result<EncryptedSt
 }
 
 /// Outcome of the responder-side BIP 324 handshake.
+#[allow(clippy::large_enum_variant)]
 pub enum ResponderOutcome {
     /// Peer sent ARK1 session marker — this is an ArkTunnel client.
     ArkClient {

@@ -205,7 +205,7 @@ pub fn v2_enc_packet(
     ignore: bool,
 ) -> Result<Vec<u8>> {
     assert!(
-        contents.len() <= (1 << 24) - 1,
+        contents.len() < (1 << 24),
         "contents too large for BIP 324 packet"
     );
     let header: u8 = if ignore { 1 << IGNORE_BIT_POS } else { 0 };

@@ -223,9 +223,11 @@ async fn handle_udp_associate(mut client: TcpStream) -> Result<()> {
     Ok(())
 }
 
+type FwdMap = Arc<Mutex<HashMap<(SocketAddr, SocketAddr), Arc<UdpSocket>>>>;
+
 async fn udp_relay_loop(
     relay: Arc<UdpSocket>,
-    fwd_map: Arc<Mutex<HashMap<(SocketAddr, SocketAddr), Arc<UdpSocket>>>>,
+    fwd_map: FwdMap,
 ) -> Result<()> {
     // 22 bytes = max SOCKS5 UDP header (RSV:2 + FRAG:1 + ATYP:1 + IPv6:16 + PORT:2)
     let mut buf = vec![0u8; 65535 + 22];

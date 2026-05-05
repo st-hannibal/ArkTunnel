@@ -91,6 +91,7 @@ impl RlpxEncryptedStream {
 // ---------------------------------------------------------------------------
 
 /// Outcome of the server-side RLPx handshake.
+#[allow(clippy::large_enum_variant)]
 pub enum ResponderOutcome {
     /// Peer sent Hello with ARK1 capability and a valid ARK1+UUID frame.
     ArkClient {
@@ -545,9 +546,11 @@ fn decode_ack_body(body: &[u8]) -> Result<([u8; 64], [u8; 32])> {
 /// Decode an auth body (old flat 162B format or EIP-8 RLP list).
 ///
 /// Returns `(sig_bytes[64], rec_id, init_pub_bytes[64], nonce_i[32])`.
+type AuthBody = ([u8; 64], u8, [u8; 64], [u8; 32]);
+
 fn decode_auth_body(
     body: &[u8],
-) -> Result<([u8; 64], u8, [u8; 64], [u8; 32])> {
+) -> Result<AuthBody> {
     if body.len() >= AUTH_BODY_SIZE && body[0] != 0xc0 && body[0] < 0xf7 {
         // Old flat format: sig(64) || rec_id(1) || pub(64) || nonce(32) || vsn(1)
         let sig: [u8; 64] = body[..64].try_into().unwrap();

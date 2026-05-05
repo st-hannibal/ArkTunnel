@@ -107,7 +107,7 @@ impl AsyncRead for RlpxStream {
         match boxed.as_mut().poll(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(e)) => {
-                Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                Poll::Ready(Err(std::io::Error::other(e)))
             }
             Poll::Ready(Ok(plaintext)) => {
                 this.read_buf = plaintext;

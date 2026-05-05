@@ -44,26 +44,15 @@ ark-client    — Local SOCKS5 bridge → outbound ArkTunnel connection
 
 ## Quick start (server)
 
-**Prerequisites:** a publicly-routable server with ports 8333 or 30303 open, and sing-box
-installed.
+**Prerequisites:** a Linux VPS (Ubuntu 20/22/24 or Debian 11/12, x86_64 or aarch64) with
+ports 8333 or 30303 open. The installer handles bitcoind/geth, sing-box, and systemd setup.
 
 ```sh
-# Install (Linux, amd64)
-curl -Lo ark-server https://github.com/YOUR_ORG/ArkTunnel/releases/latest/download/ark-server-linux-amd64
-chmod +x ark-server
-
-# Create config
-cat > /etc/ark-server.toml <<'EOF'
-transport    = "bip324"           # or "rlpx"
-listen_addr  = "0.0.0.0:8333"
-crypto_node_addr = "127.0.0.1:8334"  # your bitcoind p2p port
-
-[[uuids]]
-value = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-EOF
-
-ark-server run
+# Run as root on the VPS
+curl -fsSL https://github.com/st-hannibal/ArkTunnel/releases/latest/download/install.sh | bash
 ```
+
+The installer prints an `arktunnel://` URI at the end — copy it, you need it for the client.
 
 Live-reload config without dropping connections:
 
@@ -71,33 +60,54 @@ Live-reload config without dropping connections:
 kill -HUP $(pidof ark-server)
 ```
 
-Drop privileges after bind — the server automatically calls `setuid(nobody)` when started as
-root.  Override with `ARK_USER=myuser ark-server run`.
+Add a new user (generates a new URI):
+
+```sh
+sudo ark-server add-user
+```
+
+The server automatically drops to a dedicated `arktunnel` system user after binding the port.
 
 ---
 
 ## Quick start (client)
 
+**macOS:**
 ```sh
-# macOS/Linux universal binary
-curl -Lo ark-client https://github.com/YOUR_ORG/ArkTunnel/releases/latest/download/ark-client-macos-universal
-chmod +x ark-client
-
-ark-client \
-  --server 1.2.3.4:8333 \
-  --transport bip324 \
-  --uuid xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
-  --socks5 127.0.0.1:1080
+curl -fsSL https://github.com/st-hannibal/ArkTunnel/releases/latest/download/install-client-mac.sh | bash
 ```
 
-Configure v2rayNG / NekoBox / Clash to use `socks5://127.0.0.1:1080`.
+**Linux:**
+```sh
+curl -fsSL https://github.com/st-hannibal/ArkTunnel/releases/latest/download/install-client-linux.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://github.com/st-hannibal/ArkTunnel/releases/latest/download/install-client-windows.ps1 | iex
+```
+
+Then start the proxy using the URI printed by the server `init` step:
+
+```sh
+ark-client run --uri 'arktunnel://<uuid>@<server-ip>:<port>?transport=bip324'
+```
+
+Test it:
+
+```sh
+curl --socks5 127.0.0.1:1080 https://api.ipify.org
+# should print your server's IP, not yours
+```
+
+Configure v2rayNG / NekoBox / Clash to use `socks5://127.0.0.1:1080` or `http://127.0.0.1:8118`.
 
 ---
 
 ## Building from source
 
 ```sh
-git clone https://github.com/YOUR_ORG/ArkTunnel
+git clone https://github.com/st-hannibal/ArkTunnel
 cd ArkTunnel
 cargo build --release --workspace
 ```
@@ -134,4 +144,4 @@ cargo test --workspace
 
 ## License
 
-MIT
+MIT OR Apache-2.0 — see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
