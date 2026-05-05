@@ -23,18 +23,7 @@ pub fn generate_singbox_config(cfg: &ServerConfig) -> Value {
             "listen_port": 10800,
             "users": users
         }],
-        "outbounds": [{ "type": "direct", "tag": "direct-out" }],
-        "experimental": {
-            "v2ray_api": {
-                "listen": cfg.singbox_api,
-                "stats": {
-                    "enabled": true,
-                    "inbounds": ["vless-in"],
-                    "outbounds": ["direct-out"],
-                    "users": cfg.uuids
-                }
-            }
-        }
+        "outbounds": [{ "type": "direct", "tag": "direct-out" }]
     })
 }
 
