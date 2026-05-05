@@ -342,33 +342,48 @@ These resolvers ride inside the ArkTunnel UDP relay (DoH=TCP/443, DoT=TCP/853,
 standard DNS=UDP/53), so they are end-to-end encrypted and only the chosen
 resolver — not the server operator — sees your queries.
 
-### Threat model — current limitations (v0.1.9)
+### Threat model — current limitations (v0.2.0)
 
 The cryptography is sound (BIP 324 / RLPx are real Bitcoin/Eth wire
-protocols, indistinguishable from random bytes), but **operational hardening
-is still in progress**. Read this before relying on ArkTunnel in adversarial
-environments:
+protocols, indistinguishable from random bytes), and the v0.2.x line
+closes the operational gaps that previously kept us from recommending
+ArkTunnel to higher-risk users. Read this before relying on it in
+adversarial environments:
 
-| Limitation | Why it matters | Phase |
+| Limitation | Why it matters | Status |
 |---|---|---|
 | Server operator sees plaintext DNS unless you layer DoH/DoT | They can log every hostname you visit | mitigated by DoH/DoT (above) |
-| Single static server IP | Once identified, blocked permanently | 0.2.x |
-| No traffic shaping / padding | ML-based flow analysis can flag "Bitcoin-handshake but YouTube-volume" | 0.2.x |
-| No active-probe resistance audit | A prober that connects to the server may receive distinguishable responses | 0.2.x |
-| No multi-hop / bridging | Server operator can correlate source ↔ destination | future |
-| IPv6 fully blocked in TUN mode | Apps fall back to v4; not a leak, but a feature gap | 0.3.x |
+| Single static server IP | Once identified, blocked permanently | **fixed in 0.2.0** — multi-server URI grammar (WP1) + sticky/demote failover (WP2) + signed pool registry with auto-fetch (WP3) |
+| No traffic shaping / padding | ML-based flow analysis can flag "Bitcoin-handshake but YouTube-volume" | **fixed in 0.2.0** — `--shape light\|heavy` ships length quantization + Poisson cover frames (WP4) gated on a 2-byte ARK-frame v2 capability negotiation (WP5) |
+| No active-probe resistance audit | A prober that connects to the server may receive distinguishable responses | **fixed in 0.2.0** — every malformed-input failure path holds the connection silently for a uniformly random `[10s, 60s]` then drops (no error byte ever sent); per-IP tarpit after 10 fails / 60 s (WP6); independent simulator + envelope assertion in `ark-probe` (WP7) |
+| No multi-hop / bridging | Server operator can correlate source ↔ destination | 0.2.1 (WP11) |
+| IPv6 fully blocked in TUN mode | Apps fall back to v4; not a leak, but a feature gap | 0.2.1 (WP10) |
 
-**Who should NOT use this yet:** activists, journalists, or anyone facing
-serious legal/physical risk from being identified as a circumvention user.
-For those threat models use Tor with bridges, Snowflake, or a mature
-obfuscated transport (V2Ray + CDN, Outline, etc.) until ArkTunnel ships
-traffic shaping, multi-server rotation, and a probe-resistance audit
-(targeted for the 0.2.x line).
+**Who can reasonably use it today (v0.2.0):**
 
-**Who can reasonably use it today:** users in moderately-restricted networks
-who want to bypass simple SNI/IP blocks of commercial VPNs and accept the
-trade-offs above. The BIP 324 framing genuinely defeats today's
-signature-based DPI, and v0.1.9 closes the DNS+UDP leak gaps from v0.1.8.
+* Users in moderately- and heavily-restricted networks (commercial DPI,
+  national filters that aren't running ML-based flow analysis on every
+  flow). The BIP 324 framing defeats today's signature-based DPI; the
+  WP6 tarpit makes naive active probing produce the same "stalled real
+  peer" signature it would get from a random Bitcoin node; and the
+  WP1–WP3 multi-server pool means a single blocked IP no longer kills
+  the deployment.
+* Users with a higher-risk profile **provided** they (a) run with
+  `--shape light` or `--shape heavy` against a v0.2.x server (the
+  shaping is gated on capability negotiation, so an old server still
+  works but quietly downgrades and logs a warning), (b) point the
+  client at a multi-endpoint URI or a signed pool registry rather than
+  a single hard-coded IP, and (c) understand that ArkTunnel still
+  trusts a single server operator with the source ↔ destination
+  correlation until multi-hop ships in 0.2.1 (WP11).
+
+**Who should still NOT use this:** anyone whose adversary is plausibly
+running full nation-state ML flow analysis (timing/volume correlation
+against a known-good corpus), or anyone who needs to assume the server
+operator is hostile. For the first case the v0.2.0 shaping policies
+are a *speed bump*, not a defeat — they were sized to fool standard
+DPI and unsupervised flow clustering, not a dedicated lab. For the
+second case wait for v0.2.1 multi-hop, or use Tor with bridges.
 
 ---
 
@@ -473,7 +488,9 @@ channel". The small size (6–261 bytes) minimises the metadata available to tim
 | Threat | Mitigation |
 |--------|------------|
 | Passive DPI (traffic classification) | BIP 324 / RLPx: wire bytes are computationally indistinguishable from random; no SNI, no cert, no plaintext header |
-| Active probing (server fingerprinting) | The server completes a valid Bitcoin / Ethereum handshake with every connection — including real probes |
+| Active probing (server fingerprinting) | The server completes a valid Bitcoin / Ethereum handshake with every connection — including real probes. Every malformed-input failure path holds the connection silently for a uniformly random `[10s, 60s]` then drops with no error byte (WP6); per-IP tarpit after 10 fails / 60 s short-circuits floods. The `ark-probe` crate (WP7) asserts this envelope holds end-to-end. |
+| Flow-shape analysis (volume/timing) | `--shape light\|heavy` quantizes outbound payload lengths to fixed buckets and emits Poisson-distributed cover frames during idle (WP4), gated on the ARK-frame v2 capability negotiation (WP5). v0.1.x servers are silently treated as v1 (no shaping) so the client always tunnels. |
+| Single-IP block | Multi-endpoint URI grammar (WP1) + sticky-with-demote failover (WP2) + signed pool registry with auto-fetch (WP3); rotating to a fresh node is one client restart away |
 | Credential leak | UUID is only transmitted inside the encrypted channel |
 | Session replay | Per-session ephemeral keys; nonce counter in FSChaCha20 prevents replay within a session |
 | Man-in-the-middle | EllSwift ECDH binds the session to the ephemeral key pair; a MITM would produce a different session key and the UUID packet would fail to decrypt |
