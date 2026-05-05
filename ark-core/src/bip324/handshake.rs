@@ -140,6 +140,14 @@ impl EncryptedStream {
         &mut self.inner
     }
 
+    pub fn recv_l_mut(&mut self) -> &mut FsChaCha20 {
+        &mut self.recv_l
+    }
+
+    pub fn recv_p_mut(&mut self) -> &mut FsChaCha20Poly1305 {
+        &mut self.recv_p
+    }
+
     /// Receive one BIP 324 packet. Skips decoy packets automatically.
     /// `aad` is used only for the first packet (garbage authentication).
     pub async fn recv_packet(&mut self, aad: &[u8]) -> Result<Vec<u8>> {

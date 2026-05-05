@@ -90,7 +90,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "ark-client"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "ark-core",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "ark-core"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "aes",
  "anyhow",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "ark-server"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "ark-core",

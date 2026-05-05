@@ -18,14 +18,31 @@ use tokio::net::TcpStream;
 // we need it to be usable as `Box<dyn AsyncReadWrite>`.
 //
 // BIP 324's packet framing means we cannot implement a raw byte stream directly
-// (each read must decrypt a full packet at once).  For the MVP we expose a
-// buffered shim that reads complete packets internally and surfaces the plaintext
-// to the caller as a byte stream.
+// (each read must decrypt a full packet at once).  We expose a buffered shim that
+// reads complete packets internally and surfaces the plaintext as a byte stream.
+//
+// CANCEL SAFETY: `poll_read` must not drop partially-read bytes on `Poll::Pending`.
+// We implement a persistent state machine (`RecvState`) stored in the struct so
+// that partially-read length/body bytes survive across polls.  The old approach of
+// creating a new `recv_packet` future on every poll and dropping it on Pending
+// worked on loopback (atomic delivery) but silently corrupted the stream over real
+// networks where TCP delivers data in fragments.
 
-use std::future::Future;
+use cipher::{v2_receive_contents, v2_receive_length, LENGTH_FIELD_LEN};
+use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+/// In-progress state for receiving one BIP 324 packet.
+enum RecvState {
+    /// Waiting to start a new packet.
+    Idle,
+    /// Accumulating the 3-byte encrypted length field.
+    ReadingLength { buf: [u8; LENGTH_FIELD_LEN], filled: usize },
+    /// Accumulating the AEAD ciphertext body.
+    ReadingBody { aead_len: usize, buf: Vec<u8>, filled: usize },
+}
 
 /// A thin async wrapper that surfaces `EncryptedStream` as an `AsyncRead+AsyncWrite`.
 ///
@@ -44,6 +61,8 @@ pub struct Bip324Stream {
     /// state a second time and corrupt the stream).
     flush_buf: Option<Vec<u8>>,
     flush_pos: usize,
+    /// Persistent state for the in-progress packet receive (cancel-safe).
+    recv_state: RecvState,
 }
 
 impl Bip324Stream {
@@ -55,6 +74,7 @@ impl Bip324Stream {
             write_buf: Vec::new(),
             flush_buf: None,
             flush_pos: 0,
+            recv_state: RecvState::Idle,
         }
     }
 }
@@ -69,7 +89,7 @@ impl AsyncRead for Bip324Stream {
     ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
 
-        // If there is buffered plaintext, serve it.
+        // Serve any buffered plaintext.
         if this.read_pos < this.read_buf.len() {
             let available = &this.read_buf[this.read_pos..];
             let to_copy = available.len().min(buf.remaining());
@@ -78,33 +98,85 @@ impl AsyncRead for Bip324Stream {
             return Poll::Ready(Ok(()));
         }
 
-        // Need to receive a new packet.  Use a local async block polled via
-        // a Box::pin future stored in the struct.  For simplicity we use
-        // `tokio::runtime::Handle::current().block_on` — but that panics in
-        // async context.  Instead we drive the future manually.
-        //
-        // Proper solution: store a `Pin<Box<dyn Future>>` field.  For the MVP,
-        // we register a waker and rely on the Tokio executor driving us again
-        // when the underlying TcpStream is readable.
-        //
-        // We do this via the inner TcpStream's poll_read to detect readiness,
-        // then spawn a blocking-style recv if ready.  This is sufficient for
-        // integration testing with `tokio::test`.
-        let recv_fut = this.inner.recv_packet(b"");
-        let mut boxed = Box::pin(recv_fut);
-        match boxed.as_mut().poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(e)) => {
-                Poll::Ready(Err(std::io::Error::other(e)))
-            }
-            Poll::Ready(Ok(plaintext)) => {
-                this.read_buf = plaintext;
-                this.read_pos = 0;
-                let available = &this.read_buf[this.read_pos..];
-                let to_copy = available.len().min(buf.remaining());
-                buf.put_slice(&available[..to_copy]);
-                this.read_pos += to_copy;
-                Poll::Ready(Ok(()))
+        // Drive the receive state machine.  We loop so that transitioning from
+        // ReadingLength -> ReadingBody -> serving data can happen without returning
+        // to the executor if all bytes are already in the TCP buffer.
+        loop {
+            match &mut this.recv_state {
+                RecvState::Idle => {
+                    this.recv_state = RecvState::ReadingLength {
+                        buf: [0u8; LENGTH_FIELD_LEN],
+                        filled: 0,
+                    };
+                }
+
+                RecvState::ReadingLength { buf: len_buf, filled } => {
+                    while *filled < LENGTH_FIELD_LEN {
+                        let mut rb = ReadBuf::new(&mut len_buf[*filled..]);
+                        match Pin::new(this.inner.tcp_stream_mut()).poll_read(cx, &mut rb) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                            Poll::Ready(Ok(())) => {
+                                let n = rb.filled().len();
+                                if n == 0 {
+                                    return Poll::Ready(Err(io::Error::new(
+                                        io::ErrorKind::UnexpectedEof,
+                                        "connection closed during BIP324 length read",
+                                    )));
+                                }
+                                *filled += n;
+                            }
+                        }
+                    }
+                    // All 3 length bytes present -- decrypt to get AEAD body size.
+                    let aead_len = v2_receive_length(this.inner.recv_l_mut(), len_buf);
+                    this.recv_state = RecvState::ReadingBody {
+                        aead_len,
+                        buf: vec![0u8; aead_len],
+                        filled: 0,
+                    };
+                }
+
+                RecvState::ReadingBody { aead_len, buf: body_buf, filled } => {
+                    while *filled < *aead_len {
+                        let mut rb = ReadBuf::new(&mut body_buf[*filled..]);
+                        match Pin::new(this.inner.tcp_stream_mut()).poll_read(cx, &mut rb) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                            Poll::Ready(Ok(())) => {
+                                let n = rb.filled().len();
+                                if n == 0 {
+                                    return Poll::Ready(Err(io::Error::new(
+                                        io::ErrorKind::UnexpectedEof,
+                                        "connection closed during BIP324 body read",
+                                    )));
+                                }
+                                *filled += n;
+                            }
+                        }
+                    }
+                    // Full body present -- decrypt.
+                    let body_clone = body_buf.clone();
+                    match v2_receive_contents(this.inner.recv_p_mut(), &body_clone, b"") {
+                        Err(e) => {
+                            return Poll::Ready(Err(io::Error::other(e)));
+                        }
+                        Ok(None) => {
+                            // Decoy packet -- discard and read the next one.
+                            this.recv_state = RecvState::Idle;
+                        }
+                        Ok(Some(plaintext)) => {
+                            this.recv_state = RecvState::Idle;
+                            this.read_buf = plaintext;
+                            this.read_pos = 0;
+                            let available = &this.read_buf;
+                            let to_copy = available.len().min(buf.remaining());
+                            buf.put_slice(&available[..to_copy]);
+                            this.read_pos = to_copy;
+                            return Poll::Ready(Ok(()));
+                        }
+                    }
+                }
             }
         }
     }
@@ -168,7 +240,7 @@ impl AsyncWrite for Bip324Stream {
             }
         }
 
-        // All bytes written — clear flush state and flush the TCP socket.
+        // All bytes written -- clear flush state and flush the TCP socket.
         this.flush_buf = None;
         this.flush_pos = 0;
         Pin::new(this.inner.tcp_stream_mut()).poll_flush(cx)
@@ -184,7 +256,7 @@ impl AsyncWrite for Bip324Stream {
 }
 
 // ---------------------------------------------------------------------------
-// Bip324Transport — implements the Transport trait
+// Bip324Transport -- implements the Transport trait
 // ---------------------------------------------------------------------------
 
 pub struct Bip324Transport;
