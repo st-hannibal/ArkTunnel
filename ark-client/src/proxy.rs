@@ -47,6 +47,7 @@ pub async fn open_transport_only(uri: &ArkUri) -> Result<BoxedAsyncReadWrite> {
     let tcp = TcpStream::connect(server_addr)
         .await
         .with_context(|| format!("TCP connect to ark-server {}:{}", uri.host, uri.port))?;
+    let _ = tcp.set_nodelay(true);
 
     match uri.transport {
         TransportKind::Bip324 => Bip324Transport::connect(tcp, server_addr)

@@ -70,6 +70,7 @@ pub async fn run_server() -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((stream, _peer_addr)) => {
+                let _ = stream.set_nodelay(true);
                 let cfg = cfg_rx.borrow().clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, cfg).await {
