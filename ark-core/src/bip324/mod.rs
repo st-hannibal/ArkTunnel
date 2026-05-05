@@ -182,52 +182,25 @@ impl AsyncRead for Bip324Stream {
     }
 }
 
-impl AsyncWrite for Bip324Stream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        let this = self.get_mut();
-        this.write_buf.extend_from_slice(buf);
-        Poll::Ready(Ok(buf.len()))
-    }
-
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-
-        // Step 1: encrypt write_buf into flush_buf exactly once.
-        if this.flush_buf.is_none() {
-            if this.write_buf.is_empty() {
-                return Pin::new(this.inner.tcp_stream_mut()).poll_flush(cx);
-            }
-            let data = std::mem::take(&mut this.write_buf);
-            match this.inner.encrypt_packet(&data, b"") {
-                Ok(encrypted) => {
-                    this.flush_buf = Some(encrypted);
-                    this.flush_pos = 0;
-                }
-                Err(e) => {
-                    return Poll::Ready(Err(std::io::Error::other(e)));
-                }
-            }
+impl Bip324Stream {
+    /// Drive the in-progress encrypted-packet write to TCP without re-encrypting.
+    ///
+    /// Returns `Ready(Ok(()))` once `flush_buf` is fully drained and cleared.
+    /// Returns `Pending` if the TCP socket is not writable; the encrypted bytes
+    /// remain in `flush_buf` and will be retried on the next call.
+    fn drive_pending_write(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if self.flush_buf.is_none() {
+            return Poll::Ready(Ok(()));
         }
-
-        // Step 2: write flush_buf to TCP, handling partial writes without re-encrypting.
         loop {
-            let remaining = {
-                let buf = this.flush_buf.as_ref().unwrap();
-                buf.len() - this.flush_pos
-            };
-            if remaining == 0 {
-                break;
+            let buf = self.flush_buf.as_ref().unwrap();
+            if self.flush_pos >= buf.len() {
+                self.flush_buf = None;
+                self.flush_pos = 0;
+                return Poll::Ready(Ok(()));
             }
-            let buf = this.flush_buf.as_ref().unwrap();
-            let tcp = Pin::new(this.inner.tcp_stream_mut());
-            match tcp.poll_write(cx, &buf[this.flush_pos..]) {
+            let tcp = Pin::new(self.inner.tcp_stream_mut());
+            match tcp.poll_write(cx, &buf[self.flush_pos..]) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Ready(Ok(0)) => {
@@ -236,13 +209,101 @@ impl AsyncWrite for Bip324Stream {
                         "write returned 0 bytes",
                     )));
                 }
-                Poll::Ready(Ok(n)) => this.flush_pos += n,
+                Poll::Ready(Ok(n)) => self.flush_pos += n,
+            }
+        }
+    }
+}
+
+impl AsyncWrite for Bip324Stream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+
+        // 1. Drain any encrypted packet still in flight from a previous poll_write
+        //    (cancel-safe: cipher state was advanced once when it was encrypted).
+        if this.flush_buf.is_some() {
+            match this.drive_pending_write(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(())) => {}
             }
         }
 
-        // All bytes written -- clear flush state and flush the TCP socket.
-        this.flush_buf = None;
+        // 2. Drain any legacy write_buf accumulated by older code paths.
+        if !this.write_buf.is_empty() {
+            let data = std::mem::take(&mut this.write_buf);
+            let encrypted = match this.inner.encrypt_packet(&data, b"") {
+                Ok(e) => e,
+                Err(e) => return Poll::Ready(Err(std::io::Error::other(e))),
+            };
+            this.flush_buf = Some(encrypted);
+            this.flush_pos = 0;
+            match this.drive_pending_write(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(())) => {}
+            }
+        }
+
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        // 3. Encrypt the caller's bytes as ONE BIP 324 packet (cipher state
+        //    advances exactly once) and try to send it now.
+        let encrypted = match this.inner.encrypt_packet(buf, b"") {
+            Ok(e) => e,
+            Err(e) => return Poll::Ready(Err(std::io::Error::other(e))),
+        };
+        this.flush_buf = Some(encrypted);
         this.flush_pos = 0;
+
+        // Whether the TCP write completes now or is still pending, the caller's
+        // `buf` has been fully consumed (it is committed in `flush_buf`).  The
+        // remaining bytes will drain on the next poll_write/poll_flush call.
+        match this.drive_pending_write(cx) {
+            Poll::Pending => Poll::Ready(Ok(buf.len())),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(buf.len())),
+        }
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+
+        // Drain any pending encrypted packet first.
+        if this.flush_buf.is_some() {
+            match this.drive_pending_write(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(())) => {}
+            }
+        }
+
+        // Flush legacy write_buf if anything is sitting there.
+        if !this.write_buf.is_empty() {
+            let data = std::mem::take(&mut this.write_buf);
+            let encrypted = match this.inner.encrypt_packet(&data, b"") {
+                Ok(e) => e,
+                Err(e) => return Poll::Ready(Err(std::io::Error::other(e))),
+            };
+            this.flush_buf = Some(encrypted);
+            this.flush_pos = 0;
+            match this.drive_pending_write(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(())) => {}
+            }
+        }
+
+        // All app bytes are in the TCP send buffer; ask TCP to flush it.
         Pin::new(this.inner.tcp_stream_mut()).poll_flush(cx)
     }
 
