@@ -1,0 +1,39 @@
+# Build output
+/target/
+
+# Cargo lock is kept for binaries (ark-client, ark-server) but not for libraries.
+# Uncommenting the line below would exclude it from version control.
+# Cargo.lock
+
+# Local documentation (internal notes, checklists, design scratch-pads)
+/localDocs/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V8
+.Trashes
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment / secrets — never commit these
+.env
+*.pem
+*.key
+*.p12
+server.toml
+
+# Compiled test binaries
+*.d
+
+# Coverage output
+/tarpaulin-report.html
+lcov.info

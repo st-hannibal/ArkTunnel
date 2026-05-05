@@ -1,0 +1,24 @@
+[package]
+name = "ark-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ark-server"
+path = "src/main.rs"
+
+[dependencies]
+ark-core        = { path = "../ark-core" }
+tokio           = { workspace = true }
+anyhow          = { workspace = true }
+tracing         = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid            = { workspace = true }
+clap            = { workspace = true }
+serde           = { workspace = true }
+toml            = { workspace = true }
+serde_json      = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix             = { version = "0.29", features = ["user"] }

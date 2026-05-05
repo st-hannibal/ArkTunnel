@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # Run tests on every push (not just tags) via the separate ci.yml job referenced below.
+  # This workflow only builds release artifacts on version tags.
+
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            artifact: ark-server-linux-amd64
+            client_artifact: ark-client-linux-amd64
+          - target: aarch64-unknown-linux-musl
+            artifact: ark-server-linux-arm64
+            client_artifact: ark-client-linux-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.87.0'
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools
+          # aarch64 musl cross-compiler
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-musl" ]]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
+
+      - name: Install cargo-auditable (reproducible builds + supply-chain audit)
+        run: cargo install cargo-auditable --locked
+
+      - name: Build ark-server
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
+        run: |
+          cargo auditable build \
+            --release \
+            --package ark-server \
+            --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/ark-server ${{ matrix.artifact }}
+          strip ${{ matrix.artifact }} || true
+
+      - name: Build ark-client
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
+        run: |
+          cargo auditable build \
+            --release \
+            --package ark-client \
+            --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/ark-client ${{ matrix.client_artifact }}
+          strip ${{ matrix.client_artifact }} || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.client_artifact }}
+
+  build-macos:
+    name: Build macOS universal (ark-client)
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.87.0'
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Build x86_64
+        run: |
+          cargo build --release --package ark-client --target x86_64-apple-darwin
+
+      - name: Build aarch64
+        run: |
+          cargo build --release --package ark-client --target aarch64-apple-darwin
+
+      - name: Create universal binary with lipo
+        run: |
+          lipo -create \
+            target/x86_64-apple-darwin/release/ark-client \
+            target/aarch64-apple-darwin/release/ark-client \
+            -output ark-client-macos-universal
+          strip ark-client-macos-universal
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-macos
+          path: ark-client-macos-universal
+
+  build-windows:
+    name: Build Windows x86_64 (ark-client)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.87.0'
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build ark-client
+        run: |
+          cargo build --release --package ark-client --target x86_64-pc-windows-msvc
+          copy target\x86_64-pc-windows-msvc\release\ark-client.exe ark-client-windows-amd64.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-windows
+          path: ark-client-windows-amd64.exe
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-24.04
+    needs: [build, build-macos, build-windows]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd artifacts
+          sha256sum ark-server-* ark-client-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/ark-server-linux-amd64
+            artifacts/ark-server-linux-arm64
+            artifacts/ark-client-linux-amd64
+            artifacts/ark-client-linux-arm64
+            artifacts/ark-client-macos-universal
+            artifacts/ark-client-windows-amd64.exe
+            artifacts/SHA256SUMS
+            install.sh
+            upgrade.sh
+            install-client-mac.sh
+            install-client-linux.sh
+            install-client-windows.ps1
+          generate_release_notes: true
