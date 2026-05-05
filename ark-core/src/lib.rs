@@ -1,6 +1,7 @@
 pub mod transport;
 pub mod bip324;
 pub mod rlpx;
+pub mod arkframe;
 
 // Re-export the most commonly used items at crate root.
 pub use transport::{

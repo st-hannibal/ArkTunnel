@@ -1,12 +1,11 @@
 use crate::config::ServerConfig;
 use crate::init::{build_uri, get_local_ip};
-use crate::singbox::write_singbox_config;
 use anyhow::Result;
 use uuid::Uuid;
 
 /// `ark-server add-user` — generate a new UUID, add it to the config, and print the URI.
 ///
-/// The caller must restart ark-server (or SIGHUP sing-box) for the new user to be active.
+/// The caller must restart ark-server (or SIGHUP it) for the new user to be active.
 pub fn run_add_user() -> Result<()> {
     let mut cfg = ServerConfig::load()?;
 
@@ -14,7 +13,6 @@ pub fn run_add_user() -> Result<()> {
     cfg.uuids.push(uuid.to_string());
 
     cfg.save()?;
-    write_singbox_config(&cfg)?;
 
     let host = get_local_ip().unwrap_or_else(|| "<your-server-ip>".to_string());
     let uri = build_uri(

@@ -5,10 +5,7 @@ use std::path::{Path, PathBuf};
 #[allow(dead_code)]
 pub const CONFIG_DIR: &str = "/etc/arktunnel";
 pub const CONFIG_PATH: &str = "/etc/arktunnel/server.toml";
-pub const SINGBOX_CONFIG_PATH: &str = "/etc/arktunnel/singbox.json";
 
-/// Local address where sing-box VLESS inbound listens.
-pub const SINGBOX_VLESS_ADDR: &str = "127.0.0.1:10800";
 /// Local address of bitcoind P2P (different from public port to avoid clash).
 pub const BITCOIND_LOCAL_ADDR: &str = "127.0.0.1:18444";
 /// Local address of geth P2P (offset from public 30303).
@@ -48,8 +45,6 @@ pub struct ServerConfig {
     pub listen_addr: String,
     /// Authorized user UUIDs (string form).
     pub uuids: Vec<String>,
-    /// sing-box management API address.
-    pub singbox_api: String,
     /// RLPx static public key (64-byte hex, x||y). Only present for rlpx transport.
     pub nodekey: Option<String>,
 }

@@ -2,7 +2,6 @@ mod add_user;
 mod config;
 mod init;
 mod run;
-mod singbox;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

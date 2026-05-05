@@ -18,7 +18,6 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 TRANSPORT="${ARKTUNNEL_TRANSPORT:-bip324}"
 GITHUB_REPO="arktunnel/arktunnel"
-SINGBOX_REPO="SagerNet/sing-box"
 BITCOIN_VERSION="27.0"
 RETH_VERSION="v1.3.12"
 
@@ -151,19 +150,8 @@ if ! id -u "$ARKTUNNEL_USER" &>/dev/null; then
 fi
 
 # --- sing-box ---
-if ! command -v sing-box &>/dev/null; then
-  log "Installing sing-box..."
-  SB_VERSION=$(curl -fsSL "https://api.github.com/repos/$SINGBOX_REPO/releases/latest" \
-    | grep '"tag_name"' | sed 's/.*"tag_name": *"\(.*\)".*/\1/')
-  SB_ARCHIVE="sing-box-${SB_VERSION#v}-linux-${ARCH}.tar.gz"
-  SB_URL="https://github.com/$SINGBOX_REPO/releases/download/$SB_VERSION/$SB_ARCHIVE"
-  TMP=$(mktemp -d)
-  download "$SB_URL" "$TMP/$SB_ARCHIVE"
-  tar -xzf "$TMP/$SB_ARCHIVE" -C "$TMP"
-  install -m 755 "$TMP"/sing-box-*-linux-"$ARCH"/sing-box "$BIN_DIR/sing-box"
-  rm -rf "$TMP"
-  log "sing-box $(sing-box version | head -1) installed"
-fi
+# As of v0.1.7 ArkTunnel speaks its own ARK-frame protocol natively;
+# sing-box is no longer required.
 
 # --- crypto node ---
 if [[ "$TRANSPORT" == "bip324" ]]; then

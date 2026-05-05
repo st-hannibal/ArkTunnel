@@ -1,11 +1,12 @@
 // Proxy target — the destination address for a proxied connection.
 //
 // Constructed from SOCKS5 or HTTP CONNECT address fields and passed
-// to `open_proxied_stream` and to the VLESS header builder.
+// to `open_proxied_stream` and to the ARK-frame request builder.
 
 use anyhow::{Context, Result};
 use ark_core::{
     ark1_payload,
+    arkframe,
     bip324::Bip324Transport,
     rlpx::RlpxTransport,
     transport::{BoxedAsyncReadWrite, Transport},
@@ -64,12 +65,12 @@ pub async fn open_transport_only(uri: &ArkUri) -> Result<BoxedAsyncReadWrite> {
     }
 }
 
-/// Step 2: send ARK1 + VLESS request over an already-established transport channel.
+/// Step 2: send ARK1 + ARK-frame request over an already-established transport channel.
 ///
 /// Completes a channel returned by `open_transport_only` by:
-/// 1. Sending `ARK1 || uuid` (server mux layer identifies this as ArkTunnel).
-/// 2. Sending the VLESS v0 request header (routed to sing-box by the server).
-/// 3. Reading the VLESS response header.
+/// 1. Sending `ARK1 || uuid` (server identifies this connection as ArkTunnel).
+/// 2. Sending the ARK-frame v0 TCP-connect request for `target`.
+/// 3. Reading the server's 1-byte status response.
 ///
 /// Returns the stream ready for bidirectional application data.
 pub async fn activate_proxied_stream(
@@ -77,22 +78,31 @@ pub async fn activate_proxied_stream(
     uri: &ArkUri,
     target: &Target,
 ) -> Result<BoxedAsyncReadWrite> {
-    // Send ARK1+UUID — server mux layer identifies this connection as ArkTunnel.
+    // 1. ARK1+UUID — server identifies this connection as ArkTunnel.
     let ark1 = ark1_payload(&uri.uuid);
     stream.write_all(&ark1).await.context("sending ARK1 payload")?;
     stream.flush().await.context("flushing ARK1 payload")?;
 
-    // Send VLESS request header — routed to sing-box VLESS inbound by the server.
-    let vless_req = crate::vless::build_request(&uri.uuid, target);
-    stream.write_all(&vless_req).await.context("sending VLESS request header")?;
-    stream.flush().await.context("flushing VLESS request header")?;
+    // 2. ARK-frame TCP-connect request.
+    let frame_target = target_to_frame(target);
+    let req = arkframe::build_request(&frame_target).context("building ARK-frame request")?;
+    stream.write_all(&req).await.context("sending ARK-frame request")?;
+    stream.flush().await.context("flushing ARK-frame request")?;
 
-    // Read VLESS response header from sing-box (via server relay).
-    crate::vless::read_response(&mut stream)
+    // 3. Server status byte.
+    arkframe::read_status(&mut stream)
         .await
-        .context("reading VLESS response header")?;
+        .context("reading ARK-frame status")?;
 
     Ok(stream)
+}
+
+fn target_to_frame(t: &Target) -> arkframe::FrameTarget {
+    match t {
+        Target::Ipv4(a, p) => arkframe::FrameTarget::Ipv4(*a, *p),
+        Target::Domain(d, p) => arkframe::FrameTarget::Domain(d.clone(), *p),
+        Target::Ipv6(a, p) => arkframe::FrameTarget::Ipv6(*a, *p),
+    }
 }
 
 /// Open a fully authenticated proxy stream to `target` via the ark-server at `uri`.

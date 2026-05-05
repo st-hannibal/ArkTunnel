@@ -3,7 +3,6 @@ mod pool;
 mod proxy;
 mod socks5;
 mod uri;
-mod vless;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

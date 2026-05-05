@@ -1,27 +1,21 @@
 use crate::config::{ServerConfig, TransportKind};
-use crate::singbox::{start_singbox, write_singbox_config};
 use anyhow::{Context, Result};
 use ark_core::{
+    arkframe,
     bip324::Bip324Transport,
     rlpx::RlpxTransport,
     transport::{BoxedAsyncReadWrite, Multiplexed, Transport},
-};use std::net::SocketAddr;
+};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
-/// `ark-server run` — start sing-box, then accept and mux incoming connections.
+/// `ark-server run` — accept and mux incoming connections.
 pub async fn run_server() -> Result<()> {
     let cfg = ServerConfig::load()?;
-
-    // Write the latest sing-box config (picks up any UUID changes) and start the process.
-    write_singbox_config(&cfg)?;
-    let mut singbox = start_singbox()?;
-
-    // Give sing-box a moment to bind its VLESS inbound port.
-    tokio::time::sleep(tokio::time::Duration::from_millis(750)).await;
 
     let listen_addr: SocketAddr = cfg
         .listen_addr
@@ -55,9 +49,6 @@ pub async fn run_server() -> Result<()> {
                 info!("SIGHUP received — reloading configuration");
                 match ServerConfig::load() {
                     Ok(new_cfg) => {
-                        if let Err(e) = write_singbox_config(&new_cfg) {
-                            error!("failed to write sing-box config on reload: {e}");
-                        }
                         let _ = cfg_tx.send(Arc::new(new_cfg));
                         info!("Configuration reloaded");
                     }
@@ -80,29 +71,19 @@ pub async fn run_server() -> Result<()> {
             }
             Err(e) => error!("accept error: {e}"),
         }
-
-        // Opportunistically reap sing-box if it died; restart it.
-        if let Ok(Some(code)) = singbox.try_wait() {
-            error!("sing-box exited with status {code}; restarting");
-            singbox = start_singbox()?;
-            tokio::time::sleep(tokio::time::Duration::from_millis(750)).await;
-        }
     }
 }
 
 
 async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>) -> Result<()> {
-    let singbox_addr: SocketAddr = crate::config::SINGBOX_VLESS_ADDR.parse().unwrap();
     let crypto_node_addr: SocketAddr = cfg.crypto_node_addr().parse().unwrap();
 
     match cfg.transport {
         TransportKind::Bip324 => {
             match Bip324Transport::accept(stream).await? {
-                Multiplexed::ArkClient { stream, uuid } => {
+                Multiplexed::ArkClient { mut stream, uuid } => {
                     validate_uuid(&cfg, &uuid)?;
-                    let singbox = TcpStream::connect(singbox_addr).await
-                        .context("connecting to sing-box")?;
-                    proxy(stream, singbox).await?;
+                    serve_arkframe(&mut stream).await?;
                 }
                 Multiplexed::RealPeer { mut stream, peeked } => {
                     let mut node = TcpStream::connect(crypto_node_addr).await
@@ -117,11 +98,9 @@ async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>) -> Result<
         }
         TransportKind::Rlpx => {
             match RlpxTransport::accept(stream).await? {
-                Multiplexed::ArkClient { stream, uuid } => {
+                Multiplexed::ArkClient { mut stream, uuid } => {
                     validate_uuid(&cfg, &uuid)?;
-                    let singbox = TcpStream::connect(singbox_addr).await
-                        .context("connecting to sing-box")?;
-                    proxy(stream, singbox).await?;
+                    serve_arkframe(&mut stream).await?;
                 }
                 Multiplexed::RealPeer { stream, .. } => {
                     // Relay the real Ethereum peer to the local geth/reth node.
@@ -144,6 +123,36 @@ async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>) -> Result<
             }
         }
     }
+    Ok(())
+}
+
+/// Read the client's ARK-frame request, dial the requested target, send a
+/// status byte, and pump bytes bidirectionally until either side closes.
+async fn serve_arkframe(stream: &mut BoxedAsyncReadWrite) -> Result<()> {
+    let target = arkframe::read_request(stream)
+        .await
+        .context("reading ARK-frame request")?;
+
+    let connect_str = target.to_connect_string();
+    info!("ARK-frame TCP connect → {}", connect_str);
+
+    let upstream = match TcpStream::connect(&connect_str).await {
+        Ok(s) => s,
+        Err(e) => {
+            let status = arkframe::status_for_io_error(&e);
+            let _ = arkframe::write_status(stream, status).await;
+            return Err(anyhow::Error::new(e)
+                .context(format!("dialing upstream {connect_str}")));
+        }
+    };
+    let _ = upstream.set_nodelay(true);
+
+    arkframe::write_status(stream, arkframe::STATUS_OK)
+        .await
+        .context("sending ARK-frame OK status")?;
+
+    let mut upstream = upstream;
+    tokio::io::copy_bidirectional(stream, &mut upstream).await?;
     Ok(())
 }
 
@@ -181,8 +190,3 @@ fn drop_privileges() -> Result<()> {
     Ok(())
 }
 
-/// Bidirectional proxy between a `BoxedAsyncReadWrite` (transport stream) and a `TcpStream` (sing-box).
-async fn proxy(mut transport: BoxedAsyncReadWrite, mut target: TcpStream) -> Result<()> {
-    tokio::io::copy_bidirectional(&mut transport, &mut target).await?;
-    Ok(())
-}
