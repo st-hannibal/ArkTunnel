@@ -200,14 +200,17 @@ Your SSH session to the server keeps working because of the `/32` bypass.
 
 ### Caveats
 
-- **TCP only.** UDP is dropped at the TUN layer (`-udp-timeout 0`). Browsers
-  silently fall back to TCP for QUIC/HTTP-3, so most websites work, but
-  WebRTC, native VoIP (Telegram/WhatsApp calls), online games, and any
-  UDP-only protocols will fail. Native UDP relay is queued for v0.1.9.
-- **DNS leaks outside the tunnel.** OS DNS resolution still goes to your
-  LAN/ISP resolver in cleartext UDP — your ISP / network operator sees every
-  hostname you look up even while TUN is active. Use DNS-over-HTTPS (DoH) or
-  DNS-over-TLS (DoT) at the OS level if you care about hostname privacy.
+- **UDP is now tunneled (v0.1.9).** QUIC/HTTP-3, DNS over UDP/53, WebRTC,
+  native VoIP and games go through the SOCKS5 UDP_ASSOCIATE path and out the
+  server's egress. The previous `-udp-timeout 0` workaround is gone.
+- **DNS in TUN mode goes through the tunnel automatically.** Because the OS
+  resolver's UDP/53 queries are captured by the TUN device and relayed via
+  the server, your ISP / LAN no longer sees plaintext DNS metadata while
+  TUN is active. The **server operator** still sees the queries unless you
+  also configure DoH/DoT — see [DNS privacy](#dns-privacy) below.
+- **SOCKS5-only mode (no TUN) still leaks DNS.** Apps that resolve hostnames
+  themselves before handing the IP to the SOCKS proxy will leak. Configure
+  the app to send hostnames to the SOCKS proxy ("remote DNS" / SOCKS5h).
 - **IPv6 is fully blocked while TUN is active.** ArkTunnel only carries IPv4
   today, so v6 routes are blackholed to prevent leaks of your real IPv6
   address. Apps fall back to IPv4 transparently.
@@ -220,7 +223,30 @@ Your SSH session to the server keeps working because of the `/32` bypass.
 - **One TUN session per machine.** Don't run `ark-client tun` and a second
   VPN at the same time — the routes will conflict.
 
-### Threat model — current limitations (v0.1.8)
+### DNS privacy
+
+With TUN mode active in v0.1.9, DNS queries no longer leak to your ISP — they
+are carried inside the encrypted tunnel and resolved by the **server's**
+upstream resolver. The trust boundary moves from your ISP to whoever runs
+the ArkTunnel server.
+
+If you do not fully trust the server operator, layer DNS-over-HTTPS (DoH) or
+DNS-over-TLS (DoT) on top:
+
+- **macOS / iOS:** install a configuration profile pointing at
+  `https://cloudflare-dns.com/dns-query` (Cloudflare) or
+  `https://dns.google/dns-query` (Google).
+- **Linux:** `systemd-resolved` with `DNSOverTLS=yes` and
+  `DNS=1.1.1.1#cloudflare-dns.com`.
+- **Windows 11:** Settings → Network → DNS server assignment → Manual →
+  enable "DNS over HTTPS".
+- **Browser-only:** Firefox and Chrome both expose a built-in DoH toggle.
+
+These resolvers ride inside the ArkTunnel UDP relay (DoH=TCP/443, DoT=TCP/853,
+standard DNS=UDP/53), so they are end-to-end encrypted and only the chosen
+resolver — not the server operator — sees your queries.
+
+### Threat model — current limitations (v0.1.9)
 
 The cryptography is sound (BIP 324 / RLPx are real Bitcoin/Eth wire
 protocols, indistinguishable from random bytes), but **operational hardening
@@ -229,23 +255,24 @@ environments:
 
 | Limitation | Why it matters | Phase |
 |---|---|---|
-| DNS resolved outside the tunnel | Censor sees every hostname; defeats bypass for blocked domains | 11 |
-| No UDP relay | QUIC, WebRTC, VoIP, games broken | 11 |
+| Server operator sees plaintext DNS unless you layer DoH/DoT | They can log every hostname you visit | mitigated by DoH/DoT (above) |
 | Single static server IP | Once identified, blocked permanently | 0.2.x |
 | No traffic shaping / padding | ML-based flow analysis can flag "Bitcoin-handshake but YouTube-volume" | 0.2.x |
 | No active-probe resistance audit | A prober that connects to the server may receive distinguishable responses | 0.2.x |
 | No multi-hop / bridging | Server operator can correlate source ↔ destination | future |
+| IPv6 fully blocked in TUN mode | Apps fall back to v4; not a leak, but a feature gap | 0.3.x |
 
 **Who should NOT use this yet:** activists, journalists, or anyone facing
 serious legal/physical risk from being identified as a circumvention user.
-For those threat models use Tor with bridges, Snowflake, or a mature obfuscated
-transport (V2Ray + CDN, Outline, etc.) until at least v0.1.9 ships DNS + UDP
-through the tunnel.
+For those threat models use Tor with bridges, Snowflake, or a mature
+obfuscated transport (V2Ray + CDN, Outline, etc.) until ArkTunnel ships
+traffic shaping, multi-server rotation, and a probe-resistance audit
+(targeted for the 0.2.x line).
 
 **Who can reasonably use it today:** users in moderately-restricted networks
 who want to bypass simple SNI/IP blocks of commercial VPNs and accept the
 trade-offs above. The BIP 324 framing genuinely defeats today's
-signature-based DPI.
+signature-based DPI, and v0.1.9 closes the DNS+UDP leak gaps from v0.1.8.
 
 ---
 
