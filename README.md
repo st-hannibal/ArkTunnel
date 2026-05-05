@@ -161,8 +161,13 @@ arktunnel://<uuid>@<host>:<port>[,<host>:<port>…]?transport=<name>[&backup=<ho
 - `transport=rlpx` requires `&nodekey=<hex128>` and supports a single
   endpoint only.
 
-The client tries endpoints in order on connect failure (failover behavior
-arrives in v0.2.0 WP2).
+The client tries endpoints in order on each connect attempt with a
+3-second deadline per endpoint (TCP connect + transport handshake). After
+3 consecutive failures an endpoint is demoted for 60 seconds and dropped
+to the back of the candidate list. Once an endpoint succeeds it becomes
+the *sticky* preferred entry for subsequent connections in the same
+process — this avoids scattering load across the pool. State is in-memory
+only; nothing is written to disk.
 
 ---
 

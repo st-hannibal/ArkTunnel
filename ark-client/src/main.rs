@@ -1,3 +1,4 @@
+mod endpoints;
 mod http_proxy;
 mod pool;
 mod proxy;

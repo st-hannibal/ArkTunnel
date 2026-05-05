@@ -7,14 +7,12 @@ use anyhow::{Context, Result};
 use ark_core::{
     ark1_payload,
     arkframe,
-    bip324::Bip324Transport,
-    rlpx::RlpxTransport,
-    transport::{BoxedAsyncReadWrite, Transport},
+    transport::BoxedAsyncReadWrite,
 };
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 
-use crate::uri::{ArkUri, TransportKind};
+use crate::endpoints;
+use crate::uri::ArkUri;
 
 /// Destination address for a proxied connection.
 #[derive(Debug, Clone)]
@@ -40,30 +38,11 @@ impl Target {
 /// Does NOT send ARK1 or the VLESS request — call `activate_proxied_stream`
 /// to complete the session.  This split allows the connection pool to
 /// pre-establish channels without knowing the final target address.
+///
+/// As of v0.2.0 this honors multi-endpoint URIs and dispatches via
+/// `endpoints::connect_with_failover` (sticky preference + demote-on-fail).
 pub async fn open_transport_only(uri: &ArkUri) -> Result<BoxedAsyncReadWrite> {
-    let server_addr: std::net::SocketAddr =
-        format!("{}:{}", uri.host(), uri.port())
-            .parse()
-            .with_context(|| format!("invalid server address: {}:{}", uri.host(), uri.port()))?;
-
-    let tcp = TcpStream::connect(server_addr)
-        .await
-        .with_context(|| format!("TCP connect to ark-server {}:{}", uri.host(), uri.port()))?;
-    let _ = tcp.set_nodelay(true);
-
-    match uri.transport {
-        TransportKind::Bip324 => Bip324Transport::connect(tcp, server_addr)
-            .await
-            .context("BIP 324 handshake failed"),
-        TransportKind::Rlpx => {
-            if let Some(nodekey) = uri.nodekey {
-                ark_core::rlpx::set_peer_pub(nodekey);
-            }
-            RlpxTransport::connect(tcp, server_addr)
-                .await
-                .context("RLPx handshake failed")
-        }
-    }
+    endpoints::connect_with_failover(uri).await
 }
 
 /// Step 2: send ARK1 + ARK-frame request over an already-established transport channel.
