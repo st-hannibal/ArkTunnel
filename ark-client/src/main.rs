@@ -8,6 +8,7 @@ mod tun;
 mod uri;
 
 use anyhow::Result;
+use ark_core::shaping::Shape;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,6 +57,13 @@ enum Commands {
         /// registry signature. Required together with --pool-url.
         #[arg(long)]
         pool_pubkey: Option<String>,
+        /// Traffic shaping policy (Phase 12 / WP4): `off`|`light`|`heavy`.
+        /// `off` ships no padding or cover packets and is wire-compatible
+        /// with v0.1.x servers. `light`/`heavy` activate length quantization
+        /// plus Poisson cover frames once the v2 capability bits are
+        /// negotiated (WP5).
+        #[arg(long, default_value = "off")]
+        shape: String,
     },
     /// Test connectivity to the server. Exits 0 on success, 1 on failure.
     Test {
@@ -66,6 +74,8 @@ enum Commands {
         pool_url: Option<String>,
         #[arg(long)]
         pool_pubkey: Option<String>,
+        #[arg(long, default_value = "off")]
+        shape: String,
     },
     /// Full-device mode: spawn tun2socks and route the system through ArkTunnel.
     /// Requires sudo (Linux/macOS) or Administrator (Windows).
@@ -89,6 +99,8 @@ enum Commands {
         pool_url: Option<String>,
         #[arg(long)]
         pool_pubkey: Option<String>,
+        #[arg(long, default_value = "off")]
+        shape: String,
     },
 }
 
@@ -104,24 +116,43 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { uri, socks5, http, pool_url, pool_pubkey } => {
+        Commands::Run { uri, socks5, http, pool_url, pool_pubkey, shape } => {
+            let shape: Shape = shape.parse().map_err(anyhow::Error::msg)?;
             let mut ark_uri = uri::ArkUri::parse(&uri)?;
             apply_pool(&mut ark_uri, pool_url.as_deref(), pool_pubkey.as_deref()).await?;
+            log_shape(shape);
             run_proxy(Arc::new(ark_uri), socks5, http).await?;
         }
-        Commands::Test { uri, pool_url, pool_pubkey } => {
+        Commands::Test { uri, pool_url, pool_pubkey, shape } => {
+            let shape: Shape = shape.parse().map_err(anyhow::Error::msg)?;
             let mut ark_uri = uri::ArkUri::parse(&uri)?;
             apply_pool(&mut ark_uri, pool_url.as_deref(), pool_pubkey.as_deref()).await?;
+            log_shape(shape);
             test_connectivity(ark_uri).await;
         }
-        Commands::Tun { uri, socks5, tun_name, mtu, tun2socks, pool_url, pool_pubkey } => {
+        Commands::Tun { uri, socks5, tun_name, mtu, tun2socks, pool_url, pool_pubkey, shape } => {
+            let shape: Shape = shape.parse().map_err(anyhow::Error::msg)?;
             let mut ark_uri = uri::ArkUri::parse(&uri)?;
             apply_pool(&mut ark_uri, pool_url.as_deref(), pool_pubkey.as_deref()).await?;
+            log_shape(shape);
             run_tun(Arc::new(ark_uri), socks5, tun_name, mtu, tun2socks).await?;
         }
     }
 
     Ok(())
+}
+
+/// Log the configured traffic-shaping policy. Until WP5 negotiates the
+/// v2 capability bits, anything other than `off` is recorded but not
+/// emitted on the wire (the wiring lands in WP5).
+fn log_shape(shape: Shape) {
+    match shape {
+        Shape::Off => tracing::info!(shape = %shape, "traffic shaping disabled"),
+        _ => tracing::warn!(
+            shape = %shape,
+            "traffic shaping configured but inactive: requires ARK-frame v2 (Phase 12 WP5)"
+        ),
+    }
 }
 
 /// If `--pool-url` is provided, fetch and verify the signed pool registry,

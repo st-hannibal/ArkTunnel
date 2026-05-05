@@ -209,6 +209,30 @@ A reference signer ships as `cargo run --example sign-pool -p ark-client`.
 Generate a key with `openssl rand -hex 32`; the signer prints the matching
 public key on stderr.
 
+### Traffic shaping (`--shape`)
+
+`ark-client {run,test,tun} --shape off|light|heavy` selects the
+traffic-shaping policy (Phase 12 / WP4):
+
+| Policy | Length quantization | Cover packets | Wire compat |
+|---|---|---|---|
+| `off` (default) | none | none | v0.1.x and newer |
+| `light` | round to `{256,512,1024,1280,1500}` B buckets | Poisson, mean 2 s when idle > 500 ms | requires v0.2.x server (WP5) |
+| `heavy` | same buckets | Poisson, mean 500 ms when idle > 500 ms | requires v0.2.x server (WP5) |
+
+Padding bytes are zeroed at the ARK-frame layer and then encrypted by
+the surrounding BIP 324 channel, so on-wire entropy is unaffected.
+Indicative bandwidth overhead measured against a quiet idle link:
+`light` ≈ 4 KB/s of cover, `heavy` ≈ 16 KB/s. Real-traffic overhead is
+dominated by per-packet padding, typically < 10 % for browsing-shaped
+flows.
+
+The wire-level activation is gated on ARK-frame v2 capability bits
+(WP5). Until WP5 ships, choosing `light` or `heavy` logs a
+`traffic shaping configured but inactive` warning and behaves as
+`off` — the policy preference is recorded for forward-compatibility
+but no padding or cover frames hit the wire.
+
 ---
 
 ## Full-device mode (route everything)

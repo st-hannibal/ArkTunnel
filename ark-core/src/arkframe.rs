@@ -43,6 +43,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const CMD_TCP_CONNECT: u8 = 0x01;
 pub const CMD_UDP_ASSOCIATE: u8 = 0x02;
+/// Phase 12 WP4 — cover-traffic frame. Discarded silently by v2-capable
+/// servers. NEVER sent to a peer that hasn't advertised the COVER
+/// capability bit (negotiated in WP5) — v0.1.x servers will close.
+pub const CMD_COVER: u8 = 0xFE;
 
 /// Largest UDP payload we will frame (keeps `total` < u16::MAX with header room).
 pub const MAX_UDP_PAYLOAD: usize = 65000;
@@ -346,6 +350,46 @@ pub async fn write_udp_datagram<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Cover frames (Phase 12 WP4) — wire format gated by COVER capability bit
+// ---------------------------------------------------------------------------
+
+/// Maximum cover-frame padding length (covers all length-quantization
+/// buckets and a comfortable margin for future jumbo buckets).
+pub const MAX_COVER_LEN: u16 = 8192;
+
+/// Serialize a cover frame: `[CMD_COVER, len_be_u16, len * 0x00]`.
+///
+/// The receiver discards the body silently. Padding bytes are zero —
+/// they're encrypted by the surrounding BIP 324 channel before they
+/// hit the wire, so on-wire entropy is unaffected.
+pub fn build_cover_frame(len: u16) -> Result<Vec<u8>> {
+    if len > MAX_COVER_LEN {
+        bail!("ARK-frame cover: len {len} exceeds MAX_COVER_LEN {MAX_COVER_LEN}");
+    }
+    let mut v = Vec::with_capacity(3 + len as usize);
+    v.push(CMD_COVER);
+    v.extend_from_slice(&len.to_be_bytes());
+    v.resize(3 + len as usize, 0u8);
+    Ok(v)
+}
+
+/// Read and discard a cover frame body assuming the `CMD_COVER` byte
+/// has already been consumed (server side, dispatching by `cmd`).
+pub async fn read_cover_body<R: AsyncRead + Unpin>(reader: &mut R) -> Result<u16> {
+    let mut len_buf = [0u8; 2];
+    reader.read_exact(&mut len_buf).await?;
+    let len = u16::from_be_bytes(len_buf);
+    if len > MAX_COVER_LEN {
+        bail!("ARK-frame cover: len {len} exceeds MAX_COVER_LEN {MAX_COVER_LEN}");
+    }
+    if len > 0 {
+        let mut sink = vec![0u8; len as usize];
+        reader.read_exact(&mut sink).await?;
+    }
+    Ok(len)
+}
+
 /// Read and validate the server's status byte (client side).
 pub async fn read_status<R: AsyncRead + Unpin>(reader: &mut R) -> Result<()> {
     let mut s = [0u8; 1];
@@ -514,5 +558,32 @@ mod tests {
         let oversize = vec![0u8; MAX_UDP_PAYLOAD + 1];
         let r = build_udp_datagram(&FrameTarget::Ipv4([0; 4], 0), &oversize);
         assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn cover_frame_roundtrip() {
+        let frame = build_cover_frame(512).unwrap();
+        assert_eq!(frame.len(), 3 + 512);
+        assert_eq!(frame[0], CMD_COVER);
+        assert_eq!(&frame[1..3], &512u16.to_be_bytes());
+        // Body is zeroed (BIP 324 will turn it into pseudorandom on the wire).
+        assert!(frame[3..].iter().all(|&b| b == 0));
+        // Server reads cmd byte then dispatches; simulate that here.
+        let mut r = BufReader::new(&frame[1..]);
+        let len = read_cover_body(&mut r).await.unwrap();
+        assert_eq!(len, 512);
+    }
+
+    #[tokio::test]
+    async fn cover_frame_zero_len() {
+        let frame = build_cover_frame(0).unwrap();
+        assert_eq!(frame, vec![CMD_COVER, 0, 0]);
+        let mut r = BufReader::new(&frame[1..]);
+        assert_eq!(read_cover_body(&mut r).await.unwrap(), 0);
+    }
+
+    #[test]
+    fn cover_frame_too_large_rejected() {
+        assert!(build_cover_frame(MAX_COVER_LEN + 1).is_err());
     }
 }
