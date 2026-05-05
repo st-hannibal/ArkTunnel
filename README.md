@@ -377,7 +377,7 @@ can read them — only the upstream DoH provider.
 | `--upstream` | `https://cloudflare-dns.com/dns-query` | DoH endpoint (must be HTTPS) |
 | `--socks5` | `127.0.0.1:1080` | local SOCKS5 to route through; pass `""` to bypass |
 
-### Threat model — current limitations (v0.2.0)
+### Threat model — current limitations (v0.2.1)
 
 The cryptography is sound (BIP 324 / RLPx are real Bitcoin/Eth wire
 protocols, indistinguishable from random bytes), and the v0.2.x line
