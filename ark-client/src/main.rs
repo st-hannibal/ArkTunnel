@@ -2,14 +2,25 @@ mod http_proxy;
 mod pool;
 mod proxy;
 mod socks5;
+mod tun;
 mod uri;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const DEFAULT_SOCKS5_ADDR: &str = "127.0.0.1:1080";
 const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:8118";
+
+#[cfg(target_os = "macos")]
+const DEFAULT_TUN_NAME: &str = "utun8";
+#[cfg(target_os = "linux")]
+const DEFAULT_TUN_NAME: &str = "tun8";
+#[cfg(target_os = "windows")]
+const DEFAULT_TUN_NAME: &str = "wintun";
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+const DEFAULT_TUN_NAME: &str = "tun8";
 
 #[derive(Parser)]
 #[command(
@@ -42,6 +53,25 @@ enum Commands {
         #[arg(long, short)]
         uri: String,
     },
+    /// Full-device mode: spawn tun2socks and route the system through ArkTunnel.
+    /// Requires sudo (Linux/macOS) or Administrator (Windows).
+    Tun {
+        /// arktunnel:// URI provided by the server operator.
+        #[arg(long, short)]
+        uri: String,
+        /// SOCKS5 listen address used as the tun2socks upstream.
+        #[arg(long, default_value = DEFAULT_SOCKS5_ADDR)]
+        socks5: String,
+        /// TUN/utun/Wintun device name.
+        #[arg(long, default_value = DEFAULT_TUN_NAME)]
+        tun_name: String,
+        /// MTU for the TUN device.
+        #[arg(long, default_value_t = 1500)]
+        mtu: u16,
+        /// Optional override for the tun2socks binary path.
+        #[arg(long)]
+        tun2socks: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -64,10 +94,95 @@ async fn main() -> Result<()> {
             let ark_uri = uri::ArkUri::parse(&uri)?;
             test_connectivity(ark_uri).await;
         }
+        Commands::Tun { uri, socks5, tun_name, mtu, tun2socks } => {
+            let ark_uri = Arc::new(uri::ArkUri::parse(&uri)?);
+            run_tun(ark_uri, socks5, tun_name, mtu, tun2socks).await?;
+        }
     }
 
     Ok(())
 }
+
+async fn run_tun(
+    uri: Arc<uri::ArkUri>,
+    socks5_addr: String,
+    tun_name: String,
+    mtu: u16,
+    tun2socks_override: Option<PathBuf>,
+) -> Result<()> {
+    use tracing::{error, info};
+
+    tun::require_privileges()?;
+    let binary = tun::locate_tun2socks(tun2socks_override.as_ref())?;
+    let server_ip = tun::resolve_server_ip(&uri).await?;
+
+    println!("ArkTunnel client (TUN mode)");
+    println!("  Transport   : {}", uri.transport);
+    println!("  Server      : {}:{} ({server_ip})", uri.host, uri.port);
+    println!("  UUID        : {}", uri.uuid);
+    println!("  SOCKS5      : {socks5_addr}");
+    println!("  TUN device  : {tun_name}");
+    println!("  tun2socks   : {}", binary.display());
+
+    // 1. Start in-process SOCKS5 (the upstream that tun2socks will dial).
+    let pool = pool::Pool::new(uri.clone());
+    let socks5_addr_clone = socks5_addr.clone();
+    let pool_s = pool.clone();
+    let uri_for_socks5 = uri.clone();
+    let socks5_task = tokio::spawn(async move {
+        if let Err(e) = socks5::run_socks5_server(&socks5_addr_clone, uri_for_socks5, pool_s).await {
+            error!("SOCKS5 server error: {e}");
+        }
+    });
+
+    // Give the SOCKS5 listener a beat to bind before tun2socks dials it.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let cfg = tun::TunConfig {
+        uri: uri.clone(),
+        socks5_addr,
+        tun_name,
+        mtu,
+        tun2socks_override,
+    };
+
+    // 2. Spawn tun2socks (it creates the device on macOS/Windows; on Linux
+    //    we add the addr/up below).
+    let mut child = tun::spawn_tun2socks(&cfg, &binary).await?;
+
+    // Give tun2socks a moment to create the device on macOS / Windows.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // 3. Install routes.
+    let janitor = tun::RouteJanitor::new();
+    if let Err(e) = tun::install_routes(&cfg, server_ip, &janitor).await {
+        error!("failed to install routes: {e}");
+        let _ = child.kill().await;
+        janitor.run_all().await;
+        return Err(e);
+    }
+    info!("routes installed; system traffic now flows through ArkTunnel");
+
+    // 4. Wait for either Ctrl-C or tun2socks to exit, then clean up.
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            info!("Ctrl-C received, shutting down");
+        }
+        status = child.wait() => {
+            warn!("tun2socks exited unexpectedly: {:?}", status);
+        }
+        _ = socks5_task => {
+            warn!("SOCKS5 task exited unexpectedly");
+        }
+    }
+
+    let _ = child.start_kill();
+    janitor.run_all().await;
+    info!("shutdown complete; routes restored");
+    Ok(())
+}
+
+use tracing::warn;
 
 async fn run_proxy(uri: Arc<uri::ArkUri>, socks5_addr: String, http_addr: String) -> Result<()> {
     println!("ArkTunnel client");

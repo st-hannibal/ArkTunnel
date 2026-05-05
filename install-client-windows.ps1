@@ -16,6 +16,9 @@ $Artifact  = 'ark-client-windows-amd64.exe'
 $BinaryName = 'ark-client.exe'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'arktunnel'
 
+# Pinned upstream tun2socks (https://github.com/xjasonlyu/tun2socks) used by `ark-client tun`.
+$Tun2SocksVersion = 'v2.5.2'
+
 function Write-Info  { param($Msg) Write-Host "[ark-client] $Msg" -ForegroundColor Cyan }
 function Write-Err   { param($Msg) Write-Host "[ark-client] ERROR: $Msg" -ForegroundColor Red; exit 1 }
 
@@ -71,6 +74,19 @@ try {
     Copy-Item (Join-Path $TmpDir $Artifact) -Destination $Dest -Force
     Write-Info "Installed to $Dest"
 
+    # ── tun2socks (full-device mode) ────────────────────────────────────────
+    if ($env:NO_TUN2SOCKS -ne '1') {
+        $T_Asset = 'tun2socks-windows-amd64.zip'
+        $T_Url   = "https://github.com/xjasonlyu/tun2socks/releases/download/$Tun2SocksVersion/$T_Asset"
+        Write-Info "Downloading tun2socks $Tun2SocksVersion ..."
+        Invoke-WebRequest -Uri $T_Url -OutFile (Join-Path $TmpDir $T_Asset) -UseBasicParsing
+        Expand-Archive -Path (Join-Path $TmpDir $T_Asset) -DestinationPath $TmpDir -Force
+        Copy-Item (Join-Path $TmpDir 'tun2socks-windows-amd64.exe') `
+            -Destination (Join-Path $InstallDir 'tun2socks.exe') -Force
+        Write-Info "tun2socks installed at $(Join-Path $InstallDir 'tun2socks.exe')"
+        Write-Info "Note: Wintun driver is required — see https://www.wintun.net/"
+    }
+
     # ── add to user PATH if not already present ───────────────────────────────
     $UserPath = [System.Environment]::GetEnvironmentVariable('PATH', 'User')
     if ($UserPath -notlike "*$InstallDir*") {
@@ -96,3 +112,7 @@ Write-Info ''
 Write-Info "Point your app's proxy settings to:"
 Write-Info "  SOCKS5    127.0.0.1:1080"
 Write-Info "  HTTP      127.0.0.1:8118"
+Write-Info ''
+Write-Info "For full-device mode (route everything through ArkTunnel):"
+Write-Info "  Open an elevated terminal and run:"
+Write-Info "    ark-client tun --uri 'arktunnel://...'"

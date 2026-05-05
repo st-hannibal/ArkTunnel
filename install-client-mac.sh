@@ -11,8 +11,12 @@ set -euo pipefail
 
 REPO="arktunnel/arktunnel"
 INSTALL_DIR="/usr/local/bin"
+LIBEXEC_DIR="/usr/local/libexec/arktunnel"
 BINARY="ark-client"
 ARTIFACT="ark-client-macos-universal"
+
+# Pinned upstream tun2socks (https://github.com/xjasonlyu/tun2socks) used by `ark-client tun`.
+TUN2SOCKS_VERSION="v2.5.2"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 info()  { echo "[ark-client] $*"; }
@@ -57,6 +61,28 @@ info "Checksum OK."
 info "Installing to ${INSTALL_DIR}/${BINARY}..."
 install -m 755 "${TMPDIR_LOCAL}/${ARTIFACT}" "${INSTALL_DIR}/${BINARY}"
 
+# ── tun2socks (full-device mode) ──────────────────────────────────────────────
+# Downloads the upstream xjasonlyu/tun2socks binary used by `ark-client tun`.
+# Skip with: NO_TUN2SOCKS=1 curl ... | bash
+if [[ "${NO_TUN2SOCKS:-0}" != "1" ]] && command -v unzip >/dev/null 2>&1; then
+    ARCH_T="$(uname -m)"
+    case "$ARCH_T" in
+        arm64)   T_ASSET="tun2socks-darwin-arm64.zip" ;;
+        x86_64)  T_ASSET="tun2socks-darwin-amd64.zip" ;;
+        *)       T_ASSET="" ;;
+    esac
+    if [[ -n "$T_ASSET" ]]; then
+        info "Downloading tun2socks ${TUN2SOCKS_VERSION} (${ARCH_T})..."
+        curl -fsSL -o "${TMPDIR_LOCAL}/${T_ASSET}" \
+            "https://github.com/xjasonlyu/tun2socks/releases/download/${TUN2SOCKS_VERSION}/${T_ASSET}"
+        unzip -q -o "${TMPDIR_LOCAL}/${T_ASSET}" -d "${TMPDIR_LOCAL}"
+        sudo install -d "${LIBEXEC_DIR}"
+        sudo install -m 755 "${TMPDIR_LOCAL}/tun2socks-darwin-${ARCH_T/x86_64/amd64}" \
+            "${LIBEXEC_DIR}/tun2socks"
+        info "tun2socks installed at ${LIBEXEC_DIR}/tun2socks"
+    fi
+fi
+
 info ""
 info "ark-client ${LATEST_TAG} installed successfully."
 info ""
@@ -66,3 +92,6 @@ info ""
 info "Point your app's proxy settings to:"
 info "  SOCKS5    127.0.0.1:1080"
 info "  HTTP      127.0.0.1:8118"
+info ""
+info "For full-device mode (route everything through ArkTunnel):"
+info "  sudo ark-client tun --uri 'arktunnel://...'"

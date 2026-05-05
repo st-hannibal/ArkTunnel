@@ -145,6 +145,110 @@ Point any app at `socks5://127.0.0.1:1080` or `http://127.0.0.1:8118`.
 
 ---
 
+## Full-device mode (route everything)
+
+The default `ark-client run` exposes a SOCKS5 + HTTP-CONNECT listener and only
+carries traffic from apps that explicitly use those proxies. If you want
+*every* TCP connection on the machine — system updates, App Store, native
+apps, etc. — to be tunneled through ArkTunnel, use **TUN mode**:
+
+```sh
+sudo ark-client tun --uri 'arktunnel://<uuid>@<server-ip>:8333?transport=bip324'
+```
+
+What happens:
+
+1. `ark-client` starts an in-process SOCKS5 listener on `127.0.0.1:1080`.
+2. It launches the upstream [`tun2socks`](https://github.com/xjasonlyu/tun2socks)
+   binary, which creates a virtual network device (`utun8` / `tun8` / `wintun`)
+   and forwards every packet it receives to that SOCKS5 endpoint.
+3. `ark-client` installs OS routes that send the system default route through
+   the TUN device, while keeping a `/32` host bypass to the ark-server itself
+   (otherwise the encrypted session would loop through itself).
+4. On `Ctrl-C` (or `SIGTERM`) every route is reverted in LIFO order and the
+   TUN device is torn down. Routes are restored even if `tun2socks` crashes.
+
+### Verifying
+
+After starting TUN mode, with **no proxy environment variables set**:
+
+```sh
+curl https://api.ipify.org
+# → <server public IP>
+```
+
+Your SSH session to the server keeps working because of the `/32` bypass.
+
+### Prerequisites
+
+- **Privileges:** `sudo` on macOS/Linux, an Administrator terminal on Windows.
+- **`tun2socks` binary:** the install scripts download a pinned version into
+  `/usr/local/libexec/arktunnel/tun2socks` (Unix) or alongside `ark-client.exe`
+  (Windows). To skip auto-download set `NO_TUN2SOCKS=1`.
+- **Windows only:** the [Wintun](https://www.wintun.net/) driver must be
+  installed system-wide.
+
+### Flags
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--uri` | required | `arktunnel://` URI |
+| `--socks5` | `127.0.0.1:1080` | upstream SOCKS5 listen address |
+| `--tun-name` | `utun8` / `tun8` / `wintun` | TUN device name |
+| `--mtu` | `1500` | MTU for the TUN device |
+| `--tun2socks` | auto-detect | explicit path to the `tun2socks` binary |
+
+### Caveats
+
+- **TCP only.** UDP is dropped at the TUN layer (`-udp-timeout 0`). Browsers
+  silently fall back to TCP for QUIC/HTTP-3, so most websites work, but
+  WebRTC, native VoIP (Telegram/WhatsApp calls), online games, and any
+  UDP-only protocols will fail. Native UDP relay is queued for v0.1.9.
+- **DNS leaks outside the tunnel.** OS DNS resolution still goes to your
+  LAN/ISP resolver in cleartext UDP — your ISP / network operator sees every
+  hostname you look up even while TUN is active. Use DNS-over-HTTPS (DoH) or
+  DNS-over-TLS (DoT) at the OS level if you care about hostname privacy.
+- **IPv6 is fully blocked while TUN is active.** ArkTunnel only carries IPv4
+  today, so v6 routes are blackholed to prevent leaks of your real IPv6
+  address. Apps fall back to IPv4 transparently.
+- **System default route is altered transiently.** ArkTunnel uses the
+  split-default trick (`0.0.0.0/1` + `128.0.0.0/1`) so the original default
+  route is left untouched and is restored on shutdown. If `ark-client` is
+  killed with `SIGKILL` you may need to manually restore the default route
+  (`route add default <gw>` on macOS, `ip route add default via <gw> dev <dev>`
+  on Linux).
+- **One TUN session per machine.** Don't run `ark-client tun` and a second
+  VPN at the same time — the routes will conflict.
+
+### Threat model — current limitations (v0.1.8)
+
+The cryptography is sound (BIP 324 / RLPx are real Bitcoin/Eth wire
+protocols, indistinguishable from random bytes), but **operational hardening
+is still in progress**. Read this before relying on ArkTunnel in adversarial
+environments:
+
+| Limitation | Why it matters | Phase |
+|---|---|---|
+| DNS resolved outside the tunnel | Censor sees every hostname; defeats bypass for blocked domains | 11 |
+| No UDP relay | QUIC, WebRTC, VoIP, games broken | 11 |
+| Single static server IP | Once identified, blocked permanently | 0.2.x |
+| No traffic shaping / padding | ML-based flow analysis can flag "Bitcoin-handshake but YouTube-volume" | 0.2.x |
+| No active-probe resistance audit | A prober that connects to the server may receive distinguishable responses | 0.2.x |
+| No multi-hop / bridging | Server operator can correlate source ↔ destination | future |
+
+**Who should NOT use this yet:** activists, journalists, or anyone facing
+serious legal/physical risk from being identified as a circumvention user.
+For those threat models use Tor with bridges, Snowflake, or a mature obfuscated
+transport (V2Ray + CDN, Outline, etc.) until at least v0.1.9 ships DNS + UDP
+through the tunnel.
+
+**Who can reasonably use it today:** users in moderately-restricted networks
+who want to bypass simple SNI/IP blocks of commercial VPNs and accept the
+trade-offs above. The BIP 324 framing genuinely defeats today's
+signature-based DPI.
+
+---
+
 ## Security model
 
 ### Why no TLS / SSL / HTTPS
@@ -324,10 +428,11 @@ ark-server/
 
 ark-client/
   src/
-    main.rs         — CLI (run / test)
+    main.rs         — CLI (run / test / tun)
     proxy.rs        — open_transport_only, activate_proxied_stream, Target enum
     socks5.rs       — SOCKS5 server (RFC 1928 CONNECT)
     http_proxy.rs   — HTTP CONNECT proxy
+    tun.rs          — TUN-mode subprocess + per-OS route install/teardown
     uri.rs          — ArkUri parser (arktunnel:// scheme)
     pool.rs         — connection pool (pre-established transport channels)
 ```
@@ -355,6 +460,30 @@ ARK-frame v0 defines only `cmd = 0x01` (TCP connect). To add a new command:
 3. Add a corresponding `build_request_*` encoder.
 4. Handle the new command in `ark-server/src/run.rs::serve_arkframe`.
 5. Add unit tests — see the existing `#[cfg(test)]` block in `arkframe.rs` for the pattern.
+
+### Extending TUN mode to a new platform
+
+`ark-client/src/tun.rs` keeps every OS-specific bit behind
+`#[cfg(target_os = "...")]` arms inside three functions:
+
+- `install_routes()` — the actual `route` / `ip` invocations.
+- `read_default_route_*()` — parses the original gateway/interface so it
+  can be restored on shutdown.
+- `require_privileges()` — refuses to run unprivileged.
+
+To add a new platform:
+
+1. Add a `#[cfg(target_os = "<your-os>")]` arm to each of the three functions.
+2. Every route added must be paired with a `janitor.record_undo(...)` entry so
+   shutdown reverses it. The `RouteJanitor` runs entries LIFO and never
+   propagates errors — cleanup is best-effort by design.
+3. Pick a sensible default `--tun-name` in `ark-client/src/main.rs`
+   (`DEFAULT_TUN_NAME` const, gated on `target_os`).
+4. Add the platform's `tun2socks` asset name + checksum logic to the matching
+   `install-client-*` script.
+
+No changes to the wire protocol, server, or `ark-core` are needed — TUN mode
+is a pure client-side feature on top of the existing SOCKS5 listener.
 
 ### Connection flow (reference)
 
