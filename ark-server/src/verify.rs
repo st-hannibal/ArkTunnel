@@ -160,8 +160,7 @@ async fn bitcoin_cli(conf: &str, args: &[&str]) -> Result<String> {
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let out = tokio::task::spawn_blocking(move || {
         Command::new("bitcoin-cli")
-            .arg("-conf")
-            .arg(&conf)
+            .arg(format!("-conf={conf}"))
             .args(&args)
             .output()
     })

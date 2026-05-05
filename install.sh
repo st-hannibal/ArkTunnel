@@ -17,7 +17,11 @@ set -euo pipefail
 # Configuration
 # ---------------------------------------------------------------------------
 TRANSPORT="${ARKTUNNEL_TRANSPORT:-bip324}"
-GITHUB_REPO="arktunnel/arktunnel"
+GITHUB_REPO="${ARKTUNNEL_REPO:-st-hannibal/ArkTunnel}"
+# If set, copy this local file instead of downloading the binary from a release.
+# Useful during initial bootstrapping of a fresh server before a release is
+# published.
+LOCAL_BINARY="${ARKTUNNEL_LOCAL_BINARY:-}"
 BITCOIN_VERSION="27.0"
 RETH_VERSION="v1.3.12"
 
@@ -76,6 +80,11 @@ download() {
 # ---------------------------------------------------------------------------
 gpg_verify_bitcoin() {
   local tmp="$1" archive="$2"
+
+  if [[ "${ARKTUNNEL_SKIP_GPG:-0}" == "1" ]]; then
+    warn "ARKTUNNEL_SKIP_GPG=1 — skipping GPG signature check (SHA256 still verified)"
+    return 0
+  fi
 
   if ! command -v gpg &>/dev/null; then
     warn "gpg not found — skipping GPG signature check for Bitcoin Core (SHA256 still verified)"
@@ -173,6 +182,7 @@ if [[ "$TRANSPORT" == "bip324" ]]; then
     gpg_verify_bitcoin "$TMP" "$BTC_ARCHIVE"
     tar -xzf "$TMP/$BTC_ARCHIVE" -C "$TMP"
     install -m 755 "$TMP/bitcoin-${BITCOIN_VERSION}/bin/bitcoind" "$BIN_DIR/bitcoind"
+    install -m 755 "$TMP/bitcoin-${BITCOIN_VERSION}/bin/bitcoin-cli" "$BIN_DIR/bitcoin-cli"
     rm -rf "$TMP"
     log "bitcoind $BITCOIN_VERSION installed"
 
@@ -238,18 +248,24 @@ fi
 
 # --- ark-server ---
 log "Installing ark-server..."
-ARK_VERSION=$(curl -fsSL "https://api.github.com/repos/$GITHUB_REPO/releases/latest" \
-  | grep '"tag_name"' | sed 's/.*"tag_name": *"\(.*\)".*/\1/')
-ARK_BINARY="ark-server-linux-$ARCH"
-ARK_URL="https://github.com/$GITHUB_REPO/releases/download/$ARK_VERSION/$ARK_BINARY"
-ARK_SHA_URL="https://github.com/$GITHUB_REPO/releases/download/$ARK_VERSION/SHA256SUMS"
-TMP=$(mktemp -d)
-download "$ARK_URL" "$TMP/$ARK_BINARY"
-download "$ARK_SHA_URL" "$TMP/SHA256SUMS"
-(cd "$TMP" && grep "$ARK_BINARY" SHA256SUMS | sha256sum -c -)
-install -m 755 "$TMP/$ARK_BINARY" "$BIN_DIR/ark-server"
-rm -rf "$TMP"
-log "ark-server $ARK_VERSION installed"
+if [[ -n "$LOCAL_BINARY" ]]; then
+  [[ -f "$LOCAL_BINARY" ]] || die "ARKTUNNEL_LOCAL_BINARY is set but file not found: $LOCAL_BINARY"
+  install -m 755 "$LOCAL_BINARY" "$BIN_DIR/ark-server"
+  log "ark-server installed from local file: $LOCAL_BINARY"
+else
+  ARK_VERSION=$(curl -fsSL "https://api.github.com/repos/$GITHUB_REPO/releases/latest" \
+    | grep '"tag_name"' | sed 's/.*"tag_name": *"\(.*\)".*/\1/')
+  ARK_BINARY="ark-server-linux-$ARCH"
+  ARK_URL="https://github.com/$GITHUB_REPO/releases/download/$ARK_VERSION/$ARK_BINARY"
+  ARK_SHA_URL="https://github.com/$GITHUB_REPO/releases/download/$ARK_VERSION/SHA256SUMS"
+  TMP=$(mktemp -d)
+  download "$ARK_URL" "$TMP/$ARK_BINARY"
+  download "$ARK_SHA_URL" "$TMP/SHA256SUMS"
+  (cd "$TMP" && grep "$ARK_BINARY" SHA256SUMS | sha256sum -c -)
+  install -m 755 "$TMP/$ARK_BINARY" "$BIN_DIR/ark-server"
+  rm -rf "$TMP"
+  log "ark-server $ARK_VERSION installed"
+fi
 
 # --- firewall ---
 if command -v ufw &>/dev/null; then

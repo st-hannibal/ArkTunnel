@@ -106,7 +106,7 @@ async fn render_bitcoind(conf_path: &str) -> String {
     let mut out = String::new();
 
     let peer = Command::new("bitcoin-cli")
-        .args(["-conf", conf_path, "getconnectioncount"])
+        .args([&format!("-conf={conf_path}"), "getconnectioncount"])
         .output().await;
     if let Ok(o) = peer {
         if o.status.success() {
@@ -119,7 +119,7 @@ async fn render_bitcoind(conf_path: &str) -> String {
     }
 
     let blocks = Command::new("bitcoin-cli")
-        .args(["-conf", conf_path, "getblockcount"])
+        .args([&format!("-conf={conf_path}"), "getblockcount"])
         .output().await;
     if let Ok(o) = blocks {
         if o.status.success() {
