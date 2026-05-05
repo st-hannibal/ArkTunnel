@@ -25,6 +25,7 @@ pub enum Target {
 }
 
 impl Target {
+    #[allow(dead_code)]
     pub fn port(&self) -> u16 {
         match self {
             Target::Ipv4(_, p) | Target::Domain(_, p) | Target::Ipv6(_, p) => *p,
