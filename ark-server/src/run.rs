@@ -1,4 +1,5 @@
 use crate::config::{ServerConfig, TransportKind};
+use crate::probe_defense::{self, ProbeTracker};
 use anyhow::{Context, Result};
 use ark_core::{
     arkframe,
@@ -15,6 +16,19 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{watch, Mutex};
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
+
+/// Outcome classification used by the probe-defense layer to decide
+/// whether to tarpit the source IP.
+enum ConnectionOutcome {
+    /// Handshake completed and a legitimate session ran (or the peer
+    /// turned out to be a real Bitcoin/Ethereum node we relayed). No
+    /// tarpit accounting.
+    Legitimate,
+    /// Pre-UUID failure consistent with an active probe (garbage
+    /// handshake, replay, valid handshake + wrong UUID, ...). Caller
+    /// records a failure and holds the connection open silently.
+    ProbeLike,
+}
 
 /// `ark-server run` — accept and mux incoming connections.
 pub async fn run_server() -> Result<()> {
@@ -34,6 +48,25 @@ pub async fn run_server() -> Result<()> {
 
     // Shared config pointer — updated atomically on SIGHUP.
     let (cfg_tx, cfg_rx) = watch::channel(Arc::new(cfg));
+
+    // Per-IP probe-defense tracker. Lives for the process lifetime.
+    let probes = Arc::new(ProbeTracker::new());
+
+    // Periodic GC of stale tracker entries.
+    {
+        let probes = probes.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            tick.tick().await; // skip the immediate first tick
+            loop {
+                tick.tick().await;
+                let evicted = probes.gc();
+                if evicted > 0 {
+                    debug!(evicted, "probe-defense gc");
+                }
+            }
+        });
+    }
 
     // Spawn a task that listens for SIGHUP and reloads config.
     tokio::spawn(async move {
@@ -63,12 +96,56 @@ pub async fn run_server() -> Result<()> {
 
     loop {
         match listener.accept().await {
-            Ok((stream, _peer_addr)) => {
+            Ok((stream, peer_addr)) => {
                 let _ = stream.set_nodelay(true);
                 let cfg = cfg_rx.borrow().clone();
+                let probes = probes.clone();
+                let peer_ip = peer_addr.ip();
+
+                // If the source IP is currently tarpitted, do not even
+                // attempt a handshake — accept the connection, hold it
+                // open silently for a uniformly random delay, then drop.
+                if probes.is_tarpitted(peer_ip) {
+                    debug!(%peer_ip, "tarpitted IP — silent hold");
+                    tokio::spawn(async move {
+                        probe_defense::tarpit_close(stream).await;
+                    });
+                    continue;
+                }
+
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, cfg).await {
-                        tracing::debug!("connection closed: {e}");
+                    // Duplicate the underlying socket FD: one handle is
+                    // consumed by the handshake machinery, the other is
+                    // retained so that on a probe-like failure we can
+                    // hold the TCP connection open for the random delay
+                    // (no FIN, no error byte — just stalled, like a real
+                    // peer that's waiting for us to talk first).
+                    let tarpit_handle = match dup_tcp_stream(&stream) {
+                        Ok(h) => Some(h),
+                        Err(e) => {
+                            debug!(%peer_ip, "fd dup failed: {e}");
+                            None
+                        }
+                    };
+
+                    let outcome = handle_connection(stream, cfg).await;
+
+                    let probe_like = match &outcome {
+                        Ok(ConnectionOutcome::Legitimate) => false,
+                        Ok(ConnectionOutcome::ProbeLike) => true,
+                        Err(e) => {
+                            debug!(%peer_ip, "handle_connection error: {e}");
+                            true
+                        }
+                    };
+
+                    if probe_like {
+                        if probes.record_failure(peer_ip) {
+                            probe_defense::warn_tripped(peer_ip);
+                        }
+                        if let Some(h) = tarpit_handle {
+                            probe_defense::tarpit_close(h).await;
+                        }
                     }
                 });
             }
@@ -77,54 +154,108 @@ pub async fn run_server() -> Result<()> {
     }
 }
 
+/// Duplicate the underlying socket FD of a tokio `TcpStream` so we can
+/// hold the TCP connection open from the server side after the handshake
+/// machinery has consumed (or dropped) the original handle.
+///
+/// Both handles refer to the same kernel socket; the connection is only
+/// closed when *every* duplicate has been dropped.
+fn dup_tcp_stream(stream: &TcpStream) -> std::io::Result<TcpStream> {
+    use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+    let fd = stream.as_fd();
+    // SAFETY: dup(2) returns a fresh FD owned by us; we wrap it in an
+    // OwnedFd immediately so it's closed on drop.
+    let dup_fd = unsafe { libc::dup(fd.as_raw_fd()) };
+    if dup_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let owned = unsafe { OwnedFd::from_raw_fd(dup_fd) };
+    let std_stream = std::net::TcpStream::from(owned);
+    std_stream.set_nonblocking(true)?;
+    TcpStream::from_std(std_stream)
+}
 
-async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>) -> Result<()> {
+
+async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>) -> Result<ConnectionOutcome> {
     let crypto_node_addr: SocketAddr = cfg.crypto_node_addr().parse().unwrap();
 
     match cfg.transport {
         TransportKind::Bip324 => {
-            match Bip324Transport::accept(stream).await? {
+            // Handshake failure here is a probe-like signal — the peer
+            // could not complete a valid BIP 324 handshake at all.
+            let muxed = match Bip324Transport::accept(stream).await {
+                Ok(m) => m,
+                Err(e) => {
+                    debug!("bip324 handshake failed: {e}");
+                    return Ok(ConnectionOutcome::ProbeLike);
+                }
+            };
+            match muxed {
                 Multiplexed::ArkClient { mut stream, uuid, extra } => {
-                    validate_uuid(&cfg, &uuid)?;
-                    let caps = arkframe::server_negotiate_v2(&mut stream, &extra)
-                        .await
-                        .context("v2 negotiation")?;
-                    if caps != 0 {
-                        info!(uuid = %uuid, caps = format!("0x{caps:02x}"), "ARK-frame v2 negotiated");
+                    if validate_uuid(&cfg, &uuid).is_err() {
+                        // Valid handshake, but unrecognized UUID — classic
+                        // active-probe replay. Tarpit, no error byte.
+                        debug!(%uuid, "unrecognized UUID — probe-like");
+                        return Ok(ConnectionOutcome::ProbeLike);
                     }
-                    serve_arkframe(&mut stream).await?;
+                    // Past this point, the peer proved knowledge of a
+                    // valid UUID — any later error is operational, not
+                    // a probe signal.
+                    let neg = arkframe::server_negotiate_v2(&mut stream, &extra).await;
+                    match neg {
+                        Ok(caps) => {
+                            if caps != 0 {
+                                info!(uuid = %uuid, caps = format!("0x{caps:02x}"), "ARK-frame v2 negotiated");
+                            }
+                            let _ = serve_arkframe(&mut stream).await;
+                        }
+                        Err(e) => debug!(%uuid, "v2 negotiation failed: {e}"),
+                    }
+                    Ok(ConnectionOutcome::Legitimate)
                 }
                 Multiplexed::RealPeer { mut stream, peeked } => {
+                    // Real Bitcoin peer — relay, never tarpit.
                     let mut node = TcpStream::connect(crypto_node_addr).await
                         .context("connecting to bitcoind")?;
-                    // Prepend the bytes consumed during v1 detection.
                     if !peeked.is_empty() {
                         node.write_all(&peeked).await?;
                     }
-                    tokio::io::copy_bidirectional(&mut stream, &mut node).await?;
+                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut node).await;
+                    Ok(ConnectionOutcome::Legitimate)
                 }
             }
         }
         TransportKind::Rlpx => {
-            match RlpxTransport::accept(stream).await? {
+            let muxed = match RlpxTransport::accept(stream).await {
+                Ok(m) => m,
+                Err(e) => {
+                    debug!("rlpx handshake failed: {e}");
+                    return Ok(ConnectionOutcome::ProbeLike);
+                }
+            };
+            match muxed {
                 Multiplexed::ArkClient { mut stream, uuid, extra } => {
-                    validate_uuid(&cfg, &uuid)?;
-                    let caps = arkframe::server_negotiate_v2(&mut stream, &extra)
-                        .await
-                        .context("v2 negotiation")?;
-                    if caps != 0 {
-                        info!(uuid = %uuid, caps = format!("0x{caps:02x}"), "ARK-frame v2 negotiated");
+                    if validate_uuid(&cfg, &uuid).is_err() {
+                        debug!(%uuid, "unrecognized UUID — probe-like");
+                        return Ok(ConnectionOutcome::ProbeLike);
                     }
-                    serve_arkframe(&mut stream).await?;
+                    let neg = arkframe::server_negotiate_v2(&mut stream, &extra).await;
+                    match neg {
+                        Ok(caps) => {
+                            if caps != 0 {
+                                info!(uuid = %uuid, caps = format!("0x{caps:02x}"), "ARK-frame v2 negotiated");
+                            }
+                            let _ = serve_arkframe(&mut stream).await;
+                        }
+                        Err(e) => debug!(%uuid, "v2 negotiation failed: {e}"),
+                    }
+                    Ok(ConnectionOutcome::Legitimate)
                 }
                 Multiplexed::RealPeer { stream, .. } => {
-                    // Relay the real Ethereum peer to the local geth/reth node.
-                    // We need geth's static public key to open a second RLPx session.
                     match ark_core::rlpx::read_local_geth_pubkey() {
                         Some(geth_pub) => {
-                            ark_core::rlpx::relay_to_local_geth(stream, &geth_pub, crypto_node_addr)
-                                .await
-                                .context("RLPx real-peer relay to geth")?;
+                            let _ = ark_core::rlpx::relay_to_local_geth(stream, &geth_pub, crypto_node_addr)
+                                .await;
                         }
                         None => {
                             warn!(
@@ -134,11 +265,11 @@ async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>) -> Result<
                             );
                         }
                     }
+                    Ok(ConnectionOutcome::Legitimate)
                 }
             }
         }
     }
-    Ok(())
 }
 
 /// Read the client's ARK-frame request, dial the requested target, send a

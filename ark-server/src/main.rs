@@ -1,6 +1,7 @@
 mod add_user;
 mod config;
 mod init;
+mod probe_defense;
 mod run;
 
 use anyhow::Result;
