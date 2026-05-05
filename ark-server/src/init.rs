@@ -33,6 +33,8 @@ pub async fn run_init(transport: TransportKind, server_ip: Option<String>) -> Re
         uuids: vec![uuid.to_string()],
         nodekey: nodekey.clone(),
         bitcoind_addr: None,
+        metrics_addr: None,
+        bitcoin_conf: None,
     };
 
     cfg.save()?;

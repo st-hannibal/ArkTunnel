@@ -1,4 +1,5 @@
 use crate::config::{ServerConfig, TransportKind};
+use crate::metrics::Metrics;
 use crate::probe_defense::{self, ProbeTracker};
 use anyhow::{Context, Result};
 use ark_core::{
@@ -52,6 +53,26 @@ pub async fn run_server() -> Result<()> {
     // Per-IP probe-defense tracker. Lives for the process lifetime.
     let probes = Arc::new(ProbeTracker::new());
 
+    // Process-lifetime metrics. (Phase 13 WP3.)
+    let metrics = Metrics::new();
+    {
+        let cfg_now = cfg_rx.borrow().clone();
+        if let Some(addr_s) = cfg_now.resolve_metrics_addr() {
+            match addr_s.parse::<SocketAddr>() {
+                Ok(addr) => {
+                    crate::metrics::spawn(
+                        addr,
+                        cfg_now.resolve_bitcoin_conf(),
+                        metrics.clone(),
+                    );
+                }
+                Err(e) => warn!("invalid metrics_addr {addr_s:?}: {e}"),
+            }
+        } else {
+            info!("metrics endpoint disabled");
+        }
+    }
+
     // Periodic GC of stale tracker entries.
     {
         let probes = probes.clone();
@@ -98,9 +119,10 @@ pub async fn run_server() -> Result<()> {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
                 let _ = stream.set_nodelay(true);
-                let cfg = cfg_rx.borrow().clone();
-                let probes = probes.clone();
-                let peer_ip = peer_addr.ip();
+                    let cfg = cfg_rx.borrow().clone();
+                    let probes = probes.clone();
+                    let metrics = metrics.clone();
+                    let peer_ip = peer_addr.ip();
 
                 // If the source IP is currently tarpitted, do not even
                 // attempt a handshake — accept the connection, hold it
@@ -128,7 +150,9 @@ pub async fn run_server() -> Result<()> {
                         }
                     };
 
-                    let outcome = handle_connection(stream, cfg).await;
+                    metrics.inc_session_start();
+                    let outcome = handle_connection(stream, cfg, metrics.clone()).await;
+                    metrics.inc_session_end();
 
                     let probe_like = match &outcome {
                         Ok(ConnectionOutcome::Legitimate) => false,
@@ -140,6 +164,7 @@ pub async fn run_server() -> Result<()> {
                     };
 
                     if probe_like {
+                        metrics.inc_probe_like();
                         if probes.record_failure(peer_ip) {
                             probe_defense::warn_tripped(peer_ip);
                         }
@@ -195,7 +220,7 @@ pub(crate) async fn splice_real_peer(
     Ok(())
 }
 
-async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>) -> Result<ConnectionOutcome> {
+async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>, metrics: Arc<Metrics>) -> Result<ConnectionOutcome> {
     let crypto_node_addr: Option<SocketAddr> = cfg
         .crypto_node_addr()
         .and_then(|s| s.parse().ok());
@@ -240,7 +265,9 @@ async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>) -> Result<
                     // way this is never a probe signal.
                     match crypto_node_addr {
                         Some(addr) => {
+                            metrics.inc_splice();
                             if let Err(e) = splice_real_peer(stream, peeked, addr).await {
+                                metrics.inc_splice_fail();
                                 debug!("RealPeer splice failed: {e}");
                             }
                         }

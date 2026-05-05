@@ -54,6 +54,16 @@ pub struct ServerConfig {
     /// `bip324` transport. (Phase 13 WP1.)
     #[serde(default)]
     pub bitcoind_addr: Option<String>,
+    /// Localhost-only metrics endpoint address (Phase 13 WP3).
+    /// `None` defaults to `127.0.0.1:9899`. Empty string disables.
+    /// Overridden by `ARK_METRICS_ADDR` env var.
+    #[serde(default)]
+    pub metrics_addr: Option<String>,
+    /// Path to bitcoin.conf for the metrics endpoint to invoke
+    /// `bitcoin-cli` against. Defaults to `/etc/bitcoin/bitcoin.conf`.
+    /// Overridden by `ARK_BITCOIN_CONF` env var.
+    #[serde(default)]
+    pub bitcoin_conf: Option<String>,
 }
 
 impl ServerConfig {
@@ -119,5 +129,34 @@ impl ServerConfig {
     #[allow(dead_code)]
     pub fn config_dir() -> PathBuf {
         PathBuf::from(CONFIG_DIR)
+    }
+
+    /// Resolved metrics listen address. Returns `None` if explicitly
+    /// disabled (env var or config field set to an empty string).
+    /// Resolution order: `ARK_METRICS_ADDR` env > `metrics_addr`
+    /// config field > built-in `127.0.0.1:9899`.
+    pub fn resolve_metrics_addr(&self) -> Option<String> {
+        if let Ok(env) = std::env::var("ARK_METRICS_ADDR") {
+            return if env.trim().is_empty() { None } else { Some(env) };
+        }
+        match self.metrics_addr.as_deref() {
+            Some("") => None,
+            Some(s) => Some(s.to_string()),
+            None => Some("127.0.0.1:9899".to_string()),
+        }
+    }
+
+    /// Resolved bitcoin.conf path for the metrics endpoint. Returns
+    /// `None` only if explicitly disabled. `ARK_BITCOIN_CONF` env >
+    /// `bitcoin_conf` field > `/etc/bitcoin/bitcoin.conf`.
+    pub fn resolve_bitcoin_conf(&self) -> Option<String> {
+        if let Ok(env) = std::env::var("ARK_BITCOIN_CONF") {
+            return if env.trim().is_empty() { None } else { Some(env) };
+        }
+        match self.bitcoin_conf.as_deref() {
+            Some("") => None,
+            Some(s) => Some(s.to_string()),
+            None => Some("/etc/bitcoin/bitcoin.conf".to_string()),
+        }
     }
 }

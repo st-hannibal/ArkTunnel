@@ -100,6 +100,11 @@ uuids       = ["<uuid>"]
 # Empty string disables the splice. Defaults to 127.0.0.1:18444.
 # Overridden at runtime by ARK_BITCOIND_ADDR.
 # bitcoind_addr = "127.0.0.1:18444"
+# Optional: localhost-only metrics endpoint (Phase 13 WP3).
+# Defaults to 127.0.0.1:9899; set to "" to disable.
+# Overridden at runtime by ARK_METRICS_ADDR.
+# metrics_addr  = "127.0.0.1:9899"
+# bitcoin_conf  = "/etc/bitcoin/bitcoin.conf"
 ```
 
 3. Run `ark-server` as a systemd service (see `install.sh` for the unit file template).
@@ -108,6 +113,8 @@ uuids       = ["<uuid>"]
 ```sh
 sudo systemctl status arktunnel
 sudo journalctl -u arktunnel -n 50 --no-pager
+# Phase 13 WP3: localhost-only metrics endpoint
+curl -s http://127.0.0.1:9899/metrics
 ```
 
 ---
