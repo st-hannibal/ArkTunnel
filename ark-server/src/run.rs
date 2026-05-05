@@ -176,8 +176,29 @@ fn dup_tcp_stream(stream: &TcpStream) -> std::io::Result<TcpStream> {
 }
 
 
+/// Splice an already-accepted real Bitcoin peer to a local bitcoind:
+/// connect to `upstream`, replay any bytes already peeked off the
+/// peer's stream during BIP324 handshake detection, then pump
+/// bidirectionally until either side closes. (Phase 13 WP1.)
+pub(crate) async fn splice_real_peer(
+    mut peer: BoxedAsyncReadWrite,
+    peeked: Vec<u8>,
+    upstream: SocketAddr,
+) -> Result<()> {
+    let mut node = TcpStream::connect(upstream)
+        .await
+        .with_context(|| format!("connecting to bitcoind at {upstream}"))?;
+    if !peeked.is_empty() {
+        node.write_all(&peeked).await?;
+    }
+    let _ = tokio::io::copy_bidirectional(&mut peer, &mut node).await;
+    Ok(())
+}
+
 async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>) -> Result<ConnectionOutcome> {
-    let crypto_node_addr: SocketAddr = cfg.crypto_node_addr().parse().unwrap();
+    let crypto_node_addr: Option<SocketAddr> = cfg
+        .crypto_node_addr()
+        .and_then(|s| s.parse().ok());
 
     match cfg.transport {
         TransportKind::Bip324 => {
@@ -213,14 +234,23 @@ async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>) -> Result<
                     }
                     Ok(ConnectionOutcome::Legitimate)
                 }
-                Multiplexed::RealPeer { mut stream, peeked } => {
-                    // Real Bitcoin peer — relay, never tarpit.
-                    let mut node = TcpStream::connect(crypto_node_addr).await
-                        .context("connecting to bitcoind")?;
-                    if !peeked.is_empty() {
-                        node.write_all(&peeked).await?;
+                Multiplexed::RealPeer { stream, peeked } => {
+                    // Real Bitcoin peer — relay to local bitcoind if the
+                    // splice is configured, otherwise drop silently. Either
+                    // way this is never a probe signal.
+                    match crypto_node_addr {
+                        Some(addr) => {
+                            if let Err(e) = splice_real_peer(stream, peeked, addr).await {
+                                debug!("RealPeer splice failed: {e}");
+                            }
+                        }
+                        None => {
+                            debug!(
+                                "RealPeer detected but bitcoind splice is disabled \
+                                 (set ARK_BITCOIND_ADDR or bitcoind_addr); dropping"
+                            );
+                        }
                     }
-                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut node).await;
                     Ok(ConnectionOutcome::Legitimate)
                 }
             }
@@ -252,9 +282,16 @@ async fn handle_connection(stream: TcpStream, cfg: Arc<ServerConfig>) -> Result<
                     Ok(ConnectionOutcome::Legitimate)
                 }
                 Multiplexed::RealPeer { stream, .. } => {
+                    let upstream = match crypto_node_addr {
+                        Some(a) => a,
+                        None => {
+                            debug!("RLPx RealPeer dropped — no upstream configured");
+                            return Ok(ConnectionOutcome::Legitimate);
+                        }
+                    };
                     match ark_core::rlpx::read_local_geth_pubkey() {
                         Some(geth_pub) => {
-                            let _ = ark_core::rlpx::relay_to_local_geth(stream, &geth_pub, crypto_node_addr)
+                            let _ = ark_core::rlpx::relay_to_local_geth(stream, &geth_pub, upstream)
                                 .await;
                         }
                         None => {
@@ -461,5 +498,57 @@ fn drop_privileges() -> Result<()> {
     setuid(user.uid).map_err(|e| anyhow::anyhow!("setuid: {e}"))?;
     info!("Dropped privileges to {}:{}", user.uid, user.gid);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_core::transport::BoxedAsyncReadWrite;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Phase 13 WP1: the RealPeer splice replays peeked bytes first,
+    /// then bidirectionally pumps subsequent traffic to the upstream.
+    #[tokio::test]
+    async fn splice_real_peer_replays_peeked_then_pumps() {
+        // Stub upstream "bitcoind" that echoes everything it receives,
+        // up to the first 64 bytes, so we can assert ordering.
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut s, _) = upstream.accept().await.unwrap();
+            let mut buf = vec![0u8; 64];
+            let n = s.read(&mut buf).await.unwrap();
+            buf.truncate(n);
+            s.write_all(&buf).await.unwrap();
+            buf
+        });
+
+        // The "peer" side — a real loopback TCP pair we hand into the
+        // splice as the BoxedAsyncReadWrite half.
+        let peer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer_listener.local_addr().unwrap();
+        let peer_client = tokio::net::TcpStream::connect(peer_addr).await.unwrap();
+        let (peer_server, _) = peer_listener.accept().await.unwrap();
+        let peer_server_boxed = BoxedAsyncReadWrite(Box::new(peer_server));
+
+        let peeked = b"PEEK".to_vec();
+        let splice = tokio::spawn(splice_real_peer(peer_server_boxed, peeked, upstream_addr));
+
+        // The client (acting as the real Bitcoin peer) sends extra bytes
+        // *after* what was already peeked; upstream should see PEEK+POST,
+        // and the echo should make its way back to the client.
+        let mut peer_client = peer_client;
+        peer_client.write_all(b"POST").await.unwrap();
+        let mut reply = vec![0u8; 8];
+        let n = peer_client.read(&mut reply).await.unwrap();
+        reply.truncate(n);
+        assert_eq!(&reply, b"PEEKPOST");
+
+        drop(peer_client);
+        let _ = splice.await.unwrap();
+        let upstream_saw = upstream_task.await.unwrap();
+        assert_eq!(&upstream_saw, b"PEEKPOST");
+    }
 }
 

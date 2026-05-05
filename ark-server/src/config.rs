@@ -47,6 +47,13 @@ pub struct ServerConfig {
     pub uuids: Vec<String>,
     /// RLPx static public key (64-byte hex, x||y). Only present for rlpx transport.
     pub nodekey: Option<String>,
+    /// Local bitcoind P2P address to splice real Bitcoin peers into.
+    /// `None` or empty string disables the RealPeer splice (connections
+    /// from non-ARK Bitcoin peers are silently dropped). Overridden by
+    /// the `ARK_BITCOIND_ADDR` env var when set. Only used for the
+    /// `bip324` transport. (Phase 13 WP1.)
+    #[serde(default)]
+    pub bitcoind_addr: Option<String>,
 }
 
 impl ServerConfig {
@@ -83,11 +90,28 @@ impl ServerConfig {
         self.listen_addr.rsplit(':').next().unwrap_or("8333")
     }
 
-    /// Returns the local address for the upstream crypto node.
-    pub fn crypto_node_addr(&self) -> &'static str {
+    /// Returns the local address for the upstream crypto node, or
+    /// `None` when the operator has explicitly disabled the splice
+    /// (only meaningful for the `bip324` transport — RLPx always uses
+    /// `GETH_LOCAL_ADDR`).
+    ///
+    /// Resolution order for `bip324`:
+    ///   1. `ARK_BITCOIND_ADDR` env var (empty string = disabled).
+    ///   2. `bitcoind_addr` config field (empty string = disabled).
+    ///   3. Built-in default `BITCOIND_LOCAL_ADDR`.
+    pub fn crypto_node_addr(&self) -> Option<String> {
         match self.transport {
-            TransportKind::Bip324 => BITCOIND_LOCAL_ADDR,
-            TransportKind::Rlpx => GETH_LOCAL_ADDR,
+            TransportKind::Bip324 => {
+                if let Ok(env) = std::env::var("ARK_BITCOIND_ADDR") {
+                    return if env.trim().is_empty() { None } else { Some(env) };
+                }
+                match self.bitcoind_addr.as_deref() {
+                    Some("") => None,
+                    Some(s) => Some(s.to_string()),
+                    None => Some(BITCOIND_LOCAL_ADDR.to_string()),
+                }
+            }
+            TransportKind::Rlpx => Some(GETH_LOCAL_ADDR.to_string()),
         }
     }
 

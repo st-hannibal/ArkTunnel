@@ -96,6 +96,10 @@ The server drops to a dedicated `arktunnel` system user after binding the port.
 transport   = "bip324"
 listen_addr = "0.0.0.0:8333"
 uuids       = ["<uuid>"]
+# Optional: where to splice real Bitcoin peers (Phase 13 WP1).
+# Empty string disables the splice. Defaults to 127.0.0.1:18444.
+# Overridden at runtime by ARK_BITCOIND_ADDR.
+# bitcoind_addr = "127.0.0.1:18444"
 ```
 
 3. Run `ark-server` as a systemd service (see `install.sh` for the unit file template).
