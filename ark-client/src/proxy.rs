@@ -114,3 +114,21 @@ pub async fn open_proxied_stream(uri: &ArkUri, target: &Target) -> Result<BoxedA
     let stream = open_transport_only(uri).await?;
     activate_proxied_stream(stream, uri, target).await
 }
+
+/// Open a UDP_ASSOCIATE channel: send ARK1 + UUID, then a UDP_ASSOCIATE
+/// request, and verify the server's status byte. The returned stream then
+/// carries length-prefixed ARK-frame UDP datagrams in both directions
+/// (see `arkframe::{read_udp_datagram, write_udp_datagram}`).
+pub async fn open_udp_associate_stream(uri: &ArkUri) -> Result<BoxedAsyncReadWrite> {
+    let mut stream = open_transport_only(uri).await?;
+    let ark1 = ark1_payload(&uri.uuid);
+    stream.write_all(&ark1).await.context("sending ARK1 payload")?;
+    stream.flush().await.context("flushing ARK1 payload")?;
+    let req = arkframe::build_udp_associate([0; 4], 0);
+    stream.write_all(&req).await.context("sending UDP_ASSOCIATE request")?;
+    stream.flush().await.context("flushing UDP_ASSOCIATE request")?;
+    arkframe::read_status(&mut stream)
+        .await
+        .context("reading UDP_ASSOCIATE status")?;
+    Ok(stream)
+}

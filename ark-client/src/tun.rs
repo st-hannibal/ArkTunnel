@@ -30,6 +30,7 @@ use crate::uri::ArkUri;
 /// to use as a virtual gateway.
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 const TUN_LOCAL_IP: &str = "198.18.0.1";
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 const TUN_GATEWAY_IP: &str = "198.18.0.2";
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const TUN_NETMASK_PREFIX: u8 = 15;
@@ -532,7 +533,9 @@ pub async fn spawn_tun2socks(cfg: &TunConfig, binary: &PathBuf) -> Result<Child>
         "-proxy", &format!("socks5://{}", cfg.socks5_addr),
         "-loglevel", "warning",
         "-mtu", &cfg.mtu.to_string(),
-        "-udp-timeout", "0", // drop UDP for now; Phase 11 will add UDP relay.
+        // UDP is now tunneled (Phase 11 / v0.1.9): tun2socks will use
+        // SOCKS5 UDP_ASSOCIATE against the in-process listener, which
+        // wraps each datagram in ARK-frame v1 over the encrypted channel.
     ]);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
