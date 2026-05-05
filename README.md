@@ -68,6 +68,51 @@ sudo ark-server add-user
 
 The server automatically drops to a dedicated `arktunnel` system user after binding the port.
 
+### Server runbook (validated on Amazon Linux 2023)
+
+For manual deployments (instead of `install.sh`), this sequence is known-good:
+
+1. Install `ark-server` and `sing-box` binaries under `/usr/local/bin`.
+2. Create `/etc/arktunnel/server.toml`:
+
+```toml
+transport = "bip324"
+listen_addr = "0.0.0.0:8333"
+uuids = ["<uuid>"]
+singbox_api = "127.0.0.1:9090"
+```
+
+3. Run `ark-server` as a systemd service.
+4. Verify sing-box local inbound is reachable:
+
+```sh
+sudo systemctl status arktunnel
+sudo journalctl -u arktunnel -n 100 --no-pager
+```
+
+Important sing-box compatibility notes (1.13.x):
+
+- Do not include `"transport": { "type": "tcp" }` in VLESS inbound blocks.
+- Do not include `experimental.v2ray_api` unless the binary is built with that feature.
+
+Current generated sing-box config shape is:
+
+```json
+{
+  "log": { "level": "warn", "timestamp": true },
+  "inbounds": [{
+    "type": "vless",
+    "tag": "vless-in",
+    "listen": "127.0.0.1",
+    "listen_port": 10800,
+    "users": [{ "uuid": "<uuid>", "flow": "" }]
+  }],
+  "outbounds": [{ "type": "direct", "tag": "direct-out" }]
+}
+```
+
+Note: `ark-server` rewrites sing-box config on startup, so source/template fixes are required for persistent changes.
+
 ---
 
 ## Quick start (client)
@@ -101,6 +146,26 @@ curl --socks5 127.0.0.1:1080 https://api.ipify.org
 ```
 
 Configure v2rayNG / NekoBox / Clash to use `socks5://127.0.0.1:1080` or `http://127.0.0.1:8118`.
+
+### Client smoke test flow
+
+Use this sequence when validating a freshly deployed server:
+
+```sh
+ark-client test --uri 'arktunnel://<uuid>@<server-ip>:8333?transport=bip324'
+ark-client run --uri 'arktunnel://<uuid>@<server-ip>:8333?transport=bip324'
+curl --socks5 127.0.0.1:1080 https://api.ipify.org
+```
+
+Expected result: `api.ipify.org` returns the server public IP.
+
+If `ark-client test` hangs over real internet but works locally, ensure you are running version `v0.1.4+` where BIP324 read cancel-safety is fixed.
+
+### Known networking bug fixed in v0.1.4
+
+`Bip324Stream::poll_read` previously constructed a fresh `recv_packet` future on every poll. If polling returned `Pending`, that future was dropped and any partially-consumed TCP bytes were lost, desynchronizing packet framing and causing hangs over fragmented real-world TCP.
+
+Fix in `v0.1.4`: persistent `RecvState` state machine (`Idle`, `ReadingLength`, `ReadingBody`) stored on `Bip324Stream`, so partial reads survive across polls.
 
 ---
 
