@@ -21,8 +21,7 @@ pub fn generate_singbox_config(cfg: &ServerConfig) -> Value {
             "tag": "vless-in",
             "listen": "127.0.0.1",
             "listen_port": 10800,
-            "users": users,
-            "transport": { "type": "tcp" }
+            "users": users
         }],
         "outbounds": [{ "type": "direct", "tag": "direct-out" }],
         "experimental": {
