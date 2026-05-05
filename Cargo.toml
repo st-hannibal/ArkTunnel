@@ -51,8 +51,10 @@ serde_json = "1"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 hex = "0.4"
 
-# HTTP client for pool registry fetch (Phase 12 / WP3)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# HTTP client for pool registry fetch (Phase 12 / WP3) and DoH stub (WP12).
+# `socks` enables routing DoH POSTs through the local ark-client SOCKS5
+# listener, so DNS goes through the tunnel just like normal traffic.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks"] }
 
 # Platform cache directory (Phase 12 / WP3)
 dirs = "5"

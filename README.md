@@ -348,6 +348,35 @@ These resolvers ride inside the ArkTunnel UDP relay (DoH=TCP/443, DoT=TCP/853,
 standard DNS=UDP/53), so they are end-to-end encrypted and only the chosen
 resolver — not the server operator — sees your queries.
 
+#### Bundled DoH stub (v0.2.1, WP12)
+
+If you can't reconfigure the OS resolver (locked-down corporate laptop,
+older Linux distros, etc.), `ark-client` ships a tiny in-process DoH
+forwarder you can run alongside `ark-client run` / `ark-client tun`:
+
+```bash
+# Terminal 1 — the normal tunnel.
+ark-client tun --uri 'arktunnel://<uuid>@<server>:8333'
+
+# Terminal 2 — DoH stub on UDP/5353, forwarding through the local
+# SOCKS5 listener (so the DoH POST itself egresses via the tunnel).
+ark-client doh \
+  --listen 127.0.0.1:5353 \
+  --upstream https://cloudflare-dns.com/dns-query \
+  --socks5 127.0.0.1:1080
+```
+
+Then point your OS / browser at `127.0.0.1:5353` as the DNS server.
+Queries become RFC 8484 `application/dns-message` POSTs that exit
+through the tunnel; neither the LAN/ISP nor the ark-server operator
+can read them — only the upstream DoH provider.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--listen` | `127.0.0.1:5353` | UDP listen address |
+| `--upstream` | `https://cloudflare-dns.com/dns-query` | DoH endpoint (must be HTTPS) |
+| `--socks5` | `127.0.0.1:1080` | local SOCKS5 to route through; pass `""` to bypass |
+
 ### Threat model — current limitations (v0.2.0)
 
 The cryptography is sound (BIP 324 / RLPx are real Bitcoin/Eth wire

@@ -1,3 +1,4 @@
+mod doh;
 mod endpoints;
 mod http_proxy;
 mod pool;
@@ -107,6 +108,23 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         ipv6: bool,
     },
+    /// Run a local DoH stub: listens on UDP and forwards DNS queries as
+    /// RFC 8484 DoH POSTs through the tunnel. Point your OS resolver at
+    /// the listen address to get encrypted DNS without OS-level config.
+    Doh {
+        /// UDP listen address.
+        #[arg(long, default_value = doh::DEFAULT_LISTEN)]
+        listen: String,
+        /// Upstream DoH endpoint (must be HTTPS).
+        #[arg(long, default_value = doh::DEFAULT_UPSTREAM)]
+        upstream: String,
+        /// Local SOCKS5 listener to route the DoH request through (the
+        /// one started by `ark-client run` or `ark-client tun`). Pass
+        /// the empty string to send DoH out over the host's normal
+        /// network instead (defeats the privacy goal; useful for tests).
+        #[arg(long, default_value = DEFAULT_SOCKS5_ADDR)]
+        socks5: String,
+    },
 }
 
 #[tokio::main]
@@ -141,6 +159,14 @@ async fn main() -> Result<()> {
             apply_pool(&mut ark_uri, pool_url.as_deref(), pool_pubkey.as_deref()).await?;
             log_shape(shape);
             run_tun(Arc::new(ark_uri), socks5, tun_name, mtu, tun2socks, ipv6).await?;
+        }
+        Commands::Doh { listen, upstream, socks5 } => {
+            let listen: std::net::SocketAddr = listen
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid --listen: {e}"))?;
+            let socks5 = if socks5.trim().is_empty() { None } else { Some(socks5) };
+            let cfg = doh::DohConfig::new(listen, upstream, socks5)?;
+            doh::run(cfg).await?;
         }
     }
 
