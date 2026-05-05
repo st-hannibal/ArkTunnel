@@ -390,13 +390,13 @@ can read them — only the upstream DoH provider.
 | `--upstream` | `https://cloudflare-dns.com/dns-query` | DoH endpoint (must be HTTPS) |
 | `--socks5` | `127.0.0.1:1080` | local SOCKS5 to route through; pass `""` to bypass |
 
-### Threat model — current limitations (v0.2.1)
+### Threat model — current limitations (v0.3.0)
 
 The cryptography is sound (BIP 324 / RLPx are real Bitcoin/Eth wire
-protocols, indistinguishable from random bytes), and the v0.2.x line
-closes the operational gaps that previously kept us from recommending
-ArkTunnel to higher-risk users. Read this before relying on it in
-adversarial environments:
+protocols, indistinguishable from random bytes), and the v0.2.x and
+v0.3.x lines close the operational gaps that previously kept us from
+recommending ArkTunnel to higher-risk users. Read this before relying
+on it in adversarial environments:
 
 | Limitation | Why it matters | Status |
 |---|---|---|
@@ -404,26 +404,28 @@ adversarial environments:
 | Single static server IP | Once identified, blocked permanently | **fixed in 0.2.0** — multi-server URI grammar (WP1) + sticky/demote failover (WP2) + signed pool registry with auto-fetch (WP3) |
 | No traffic shaping / padding | ML-based flow analysis can flag "Bitcoin-handshake but YouTube-volume" | **fixed in 0.2.0** — `--shape light\|heavy` ships length quantization + Poisson cover frames (WP4) gated on a 2-byte ARK-frame v2 capability negotiation (WP5) |
 | No active-probe resistance audit | A prober that connects to the server may receive distinguishable responses | **fixed in 0.2.0** — every malformed-input failure path holds the connection silently for a uniformly random `[10s, 60s]` then drops (no error byte ever sent); per-IP tarpit after 10 fails / 60 s (WP6); independent simulator + envelope assertion in `ark-probe` (WP7) |
-| No multi-hop / bridging | Server operator can correlate source ↔ destination | 0.2.1 (WP11) |
+| Server-side `:8333` was an unused port (no real Bitcoin peer behind it) | A censor that runs a real Bitcoin node would have noticed our IP never relaying blocks | **fixed in 0.3.0** — server now co-hosts a real pruned mainnet `bitcoind` on `:8333` and splices any non-ark TCP probe straight into it. From the censor's point of view the IP is indistinguishable from a regular Bitcoin Core node, with the public-peer graph and bitnodes.io listing to back it up (WP1–WP4) |
+| No multi-hop / bridging | Server operator can correlate source ↔ destination | 0.4.x (WP11) |
 | IPv6 fully blocked in TUN mode | Apps fall back to v4; not a leak, but a feature gap | 0.2.1 (WP10) |
 
-**Who can reasonably use it today (v0.2.0):**
+**Who can reasonably use it today (v0.3.0):**
 
 * Users in moderately- and heavily-restricted networks (commercial DPI,
   national filters that aren't running ML-based flow analysis on every
   flow). The BIP 324 framing defeats today's signature-based DPI; the
   WP6 tarpit makes naive active probing produce the same "stalled real
-  peer" signature it would get from a random Bitcoin node; and the
+  peer" signature it would get from a random Bitcoin node; the
   WP1–WP3 multi-server pool means a single blocked IP no longer kills
-  the deployment.
+  the deployment; and the v0.3.0 bitcoind co-tenancy means an active
+  scan of `:8333` returns a *real* Bitcoin handshake, not a curt RST.
 * Users with a higher-risk profile **provided** they (a) run with
-  `--shape light` or `--shape heavy` against a v0.2.x server (the
+  `--shape light` or `--shape heavy` against a v0.2.x+ server (the
   shaping is gated on capability negotiation, so an old server still
   works but quietly downgrades and logs a warning), (b) point the
   client at a multi-endpoint URI or a signed pool registry rather than
   a single hard-coded IP, and (c) understand that ArkTunnel still
   trusts a single server operator with the source ↔ destination
-  correlation until multi-hop ships in 0.2.1 (WP11).
+  correlation until multi-hop ships.
 
 **Who should still NOT use this:** anyone whose adversary is plausibly
 running full nation-state ML flow analysis (timing/volume correlation
@@ -431,7 +433,7 @@ against a known-good corpus), or anyone who needs to assume the server
 operator is hostile. For the first case the v0.2.0 shaping policies
 are a *speed bump*, not a defeat — they were sized to fool standard
 DPI and unsupervised flow clustering, not a dedicated lab. For the
-second case wait for v0.2.1 multi-hop, or use Tor with bridges.
+second case wait for multi-hop, or use Tor with bridges.
 
 ---
 
